@@ -28,7 +28,7 @@ struct ClaudeInstancesView: View {
                 .font(.system(size: 13, weight: .medium))
                 .foregroundColor(.white.opacity(0.4))
 
-            Text("Run claude in terminal")
+            Text("Run Claude Code or Cursor")
                 .font(.system(size: 11))
                 .foregroundColor(.white.opacity(0.25))
         }
@@ -56,10 +56,9 @@ struct ClaudeInstancesView: View {
     }
 
     /// Lower number = higher priority
-    /// Approval requests share priority with processing to maintain stable ordering
     private func phasePriority(_ phase: SessionPhase) -> Int {
         switch phase {
-        case .waitingForApproval, .processing, .compacting: return 0
+        case .processing, .compacting: return 0
         case .waitingForInput: return 1
         case .idle, .ended: return 2
         }
@@ -73,9 +72,7 @@ struct ClaudeInstancesView: View {
                         session: session,
                         onFocus: { focusSession(session) },
                         onChat: { openChat(session) },
-                        onArchive: { archiveSession(session) },
-                        onApprove: { approveSession(session) },
-                        onReject: { rejectSession(session) }
+                        onArchive: { archiveSession(session) }
                     )
                     .id(session.stableId)
                 }
@@ -88,12 +85,11 @@ struct ClaudeInstancesView: View {
     // MARK: - Actions
 
     private func focusSession(_ session: SessionState) {
-        guard session.isInTmux else { return }
-
         Task {
-            if let pid = session.pid {
-                _ = await YabaiController.shared.focusWindow(forClaudePid: pid)
-            } else {
+            switch session.agentType {
+            case .cursor:
+                _ = await CursorWindowFocuser.shared.focusCursorWindow(workspacePath: session.cwd)
+            case .claude:
                 _ = await YabaiController.shared.focusWindow(forWorkingDirectory: session.cwd)
             }
         }
@@ -101,14 +97,6 @@ struct ClaudeInstancesView: View {
 
     private func openChat(_ session: SessionState) {
         viewModel.showChat(for: session)
-    }
-
-    private func approveSession(_ session: SessionState) {
-        sessionMonitor.approvePermission(sessionId: session.sessionId)
-    }
-
-    private func rejectSession(_ session: SessionState) {
-        sessionMonitor.denyPermission(sessionId: session.sessionId, reason: nil)
     }
 
     private func archiveSession(_ session: SessionState) {
@@ -123,8 +111,6 @@ struct InstanceRow: View {
     let onFocus: () -> Void
     let onChat: () -> Void
     let onArchive: () -> Void
-    let onApprove: () -> Void
-    let onReject: () -> Void
 
     @State private var isHovered = false
     @State private var spinnerPhase = 0
@@ -134,17 +120,6 @@ struct InstanceRow: View {
     private let spinnerSymbols = ["·", "✢", "✳", "∗", "✻", "✽"]
     private let spinnerTimer = Timer.publish(every: 0.15, on: .main, in: .common).autoconnect()
 
-    /// Whether we're showing the approval UI
-    private var isWaitingForApproval: Bool {
-        session.phase.isWaitingForApproval
-    }
-
-    /// Whether the pending tool requires interactive input (not just approve/deny)
-    private var isInteractiveTool: Bool {
-        guard let toolName = session.pendingToolName else { return false }
-        return toolName == "AskUserQuestion"
-    }
-
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
             // State indicator on left
@@ -153,31 +128,17 @@ struct InstanceRow: View {
 
             // Text content
             VStack(alignment: .leading, spacing: 2) {
-                Text(session.displayTitle)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(.white)
-                    .lineLimit(1)
+                HStack(spacing: 5) {
+                    AgentBadge(agentType: session.agentType)
 
-                // Show tool call when waiting for approval, otherwise last activity
-                if isWaitingForApproval, let toolName = session.pendingToolName {
-                    // Show tool name in amber + input on same line
-                    HStack(spacing: 4) {
-                        Text(MCPToolFormatter.formatToolName(toolName))
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .foregroundColor(TerminalColors.amber.opacity(0.9))
-                        if isInteractiveTool {
-                            Text("Needs your input")
-                                .font(.system(size: 11))
-                                .foregroundColor(.white.opacity(0.5))
-                                .lineLimit(1)
-                        } else if let input = session.pendingToolInput {
-                            Text(input)
-                                .font(.system(size: 11))
-                                .foregroundColor(.white.opacity(0.5))
-                                .lineLimit(1)
-                        }
-                    }
-                } else if let role = session.lastMessageRole {
+                    Text(session.displayTitle)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                }
+
+                // Show last activity
+                if let role = session.lastMessageRole {
                     switch role {
                     case "tool":
                         // Tool call - show tool name + input
@@ -226,62 +187,36 @@ struct InstanceRow: View {
 
             Spacer(minLength: 0)
 
-            // Action icons or approval buttons
-            if isWaitingForApproval && isInteractiveTool {
-                // Interactive tools like AskUserQuestion - show chat + terminal buttons
-                HStack(spacing: 8) {
-                    IconButton(icon: "bubble.left") {
-                        onChat()
-                    }
+            // Action icons
+            HStack(spacing: 8) {
+                IconButton(icon: "bubble.left") {
+                    onChat()
+                }
 
-                    // Go to Terminal button (only if yabai available)
-                    if isYabaiAvailable {
-                        TerminalButton(
-                            isEnabled: session.isInTmux,
-                            onTap: { onFocus() }
-                        )
+                if isYabaiAvailable || session.agentType == .cursor {
+                    IconButton(icon: "eye") {
+                        onFocus()
                     }
                 }
-                .transition(.opacity.combined(with: .scale(scale: 0.9)))
-            } else if isWaitingForApproval {
-                InlineApprovalButtons(
-                    onChat: onChat,
-                    onApprove: onApprove,
-                    onReject: onReject
-                )
-                .transition(.opacity.combined(with: .scale(scale: 0.9)))
-            } else {
-                HStack(spacing: 8) {
-                    // Chat icon - always show
-                    IconButton(icon: "bubble.left") {
-                        onChat()
-                    }
 
-                    // Focus icon (only for tmux instances with yabai)
-                    if session.isInTmux && isYabaiAvailable {
-                        IconButton(icon: "eye") {
-                            onFocus()
-                        }
-                    }
-
-                    // Archive button - only for idle or completed sessions
-                    if session.phase == .idle || session.phase == .waitingForInput {
-                        IconButton(icon: "archivebox") {
-                            onArchive()
-                        }
+                if session.phase == .idle || session.phase == .waitingForInput {
+                    IconButton(icon: "archivebox") {
+                        onArchive()
                     }
                 }
-                .transition(.opacity.combined(with: .scale(scale: 0.9)))
             }
+            .transition(.opacity.combined(with: .scale(scale: 0.9)))
         }
         .padding(.leading, 8)
         .padding(.trailing, 14)
         .padding(.vertical, 10)
         .contentShape(Rectangle())
+        .onTapGesture(count: 1) {
+            onFocus()
+        }
         .onTapGesture(count: 2) {
             onChat()
         }
-        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isWaitingForApproval)
         .background(
             RoundedRectangle(cornerRadius: 12)
                 .fill(isHovered ? Color.white.opacity(0.06) : Color.clear)
@@ -302,13 +237,6 @@ struct InstanceRow: View {
                 .onReceive(spinnerTimer) { _ in
                     spinnerPhase = (spinnerPhase + 1) % spinnerSymbols.count
                 }
-        case .waitingForApproval:
-            Text(spinnerSymbols[spinnerPhase % spinnerSymbols.count])
-                .font(.system(size: 12, weight: .bold))
-                .foregroundColor(TerminalColors.amber)
-                .onReceive(spinnerTimer) { _ in
-                    spinnerPhase = (spinnerPhase + 1) % spinnerSymbols.count
-                }
         case .waitingForInput:
             Circle()
                 .fill(TerminalColors.green)
@@ -320,71 +248,6 @@ struct InstanceRow: View {
         }
     }
 
-}
-
-// MARK: - Inline Approval Buttons
-
-/// Compact inline approval buttons with staggered animation
-struct InlineApprovalButtons: View {
-    let onChat: () -> Void
-    let onApprove: () -> Void
-    let onReject: () -> Void
-
-    @State private var showChatButton = false
-    @State private var showDenyButton = false
-    @State private var showAllowButton = false
-
-    var body: some View {
-        HStack(spacing: 6) {
-            // Chat button
-            IconButton(icon: "bubble.left") {
-                onChat()
-            }
-            .opacity(showChatButton ? 1 : 0)
-            .scaleEffect(showChatButton ? 1 : 0.8)
-
-            Button {
-                onReject()
-            } label: {
-                Text("Deny")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.white.opacity(0.6))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(Color.white.opacity(0.1))
-                    .clipShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .opacity(showDenyButton ? 1 : 0)
-            .scaleEffect(showDenyButton ? 1 : 0.8)
-
-            Button {
-                onApprove()
-            } label: {
-                Text("Allow")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.black)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(Color.white.opacity(0.9))
-                    .clipShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .opacity(showAllowButton ? 1 : 0)
-            .scaleEffect(showAllowButton ? 1 : 0.8)
-        }
-        .onAppear {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.7).delay(0.0)) {
-                showChatButton = true
-            }
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.7).delay(0.05)) {
-                showDenyButton = true
-            }
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.7).delay(0.1)) {
-                showAllowButton = true
-            }
-        }
-    }
 }
 
 // MARK: - Icon Button
@@ -410,6 +273,32 @@ struct IconButton: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
+    }
+}
+
+// MARK: - Agent Type Badge
+
+struct AgentBadge: View {
+    let agentType: AgentType
+
+    var body: some View {
+        Text(agentType == .cursor ? "C" : "CC")
+            .font(.system(size: 8, weight: .bold, design: .monospaced))
+            .foregroundColor(badgeColor.opacity(0.9))
+            .padding(.horizontal, 3)
+            .padding(.vertical, 1)
+            .background(
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(badgeColor.opacity(0.15))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 3)
+                    .strokeBorder(badgeColor.opacity(0.3), lineWidth: 0.5)
+            )
+    }
+
+    private var badgeColor: Color {
+        agentType == .cursor ? Color.blue : Color(red: 0.85, green: 0.47, blue: 0.34)
     }
 }
 

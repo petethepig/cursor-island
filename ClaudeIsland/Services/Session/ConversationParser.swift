@@ -27,6 +27,9 @@ actor ConversationParser {
     /// Cache of parsed conversation info, keyed by session file path
     private var cache: [String: CachedInfo] = [:]
 
+    /// Explicit transcript paths provided by Cursor (sessionId → file path)
+    private var transcriptPaths: [String: String] = [:]
+
     private var incrementalState: [String: IncrementalParseState] = [:]
 
     private struct CachedInfo {
@@ -72,8 +75,7 @@ actor ConversationParser {
     /// Parse a JSONL file to extract conversation info
     /// Uses caching based on file modification time
     func parse(sessionId: String, cwd: String) -> ConversationInfo {
-        let projectDir = cwd.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
-        let sessionFile = NSHomeDirectory() + "/.claude/projects/" + projectDir + "/" + sessionId + ".jsonl"
+        let sessionFile = resolveSessionFilePath(sessionId: sessionId, cwd: cwd)
 
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: sessionFile),
@@ -117,16 +119,15 @@ actor ConversationParser {
                 continue
             }
 
-            let type = json["type"] as? String
+            let type = (json["type"] as? String) ?? (json["role"] as? String)
             let isMeta = json["isMeta"] as? Bool ?? false
 
             if type == "user" && !isMeta {
-                if let message = json["message"] as? [String: Any],
-                   let msgContent = message["content"] as? String {
-                    if !msgContent.hasPrefix("<command-name>") && !msgContent.hasPrefix("<local-command") && !msgContent.hasPrefix("Caveat:") {
-                        firstUserMessage = Self.truncateMessage(msgContent, maxLength: 50)
-                        break
-                    }
+                let msgContent = Self.extractMessageContent(from: json)
+                if let msg = msgContent, !msg.hasPrefix("<command-name>"), !msg.hasPrefix("<local-command"), !msg.hasPrefix("Caveat:") {
+                    let cleaned = Self.stripXMLTags(msg)
+                    firstUserMessage = Self.truncateMessage(cleaned, maxLength: 50)
+                    break
                 }
             }
         }
@@ -138,7 +139,7 @@ actor ConversationParser {
                 continue
             }
 
-            let type = json["type"] as? String
+            let type = (json["type"] as? String) ?? (json["role"] as? String)
 
             if lastMessage == nil {
                 if type == "user" || type == "assistant" {
@@ -174,14 +175,12 @@ actor ConversationParser {
 
             if !foundLastUserMessage && type == "user" {
                 let isMeta = json["isMeta"] as? Bool ?? false
-                if !isMeta, let message = json["message"] as? [String: Any] {
-                    if let msgContent = message["content"] as? String {
-                        if !msgContent.hasPrefix("<command-name>") && !msgContent.hasPrefix("<local-command") && !msgContent.hasPrefix("Caveat:") {
-                            if let timestampStr = json["timestamp"] as? String {
-                                lastUserMessageDate = formatter.date(from: timestampStr)
-                            }
-                            foundLastUserMessage = true
+                if !isMeta, let msgContent = Self.extractMessageContent(from: json) {
+                    if !msgContent.hasPrefix("<command-name>"), !msgContent.hasPrefix("<local-command"), !msgContent.hasPrefix("Caveat:") {
+                        if let timestampStr = json["timestamp"] as? String {
+                            lastUserMessageDate = formatter.date(from: timestampStr)
                         }
+                        foundLastUserMessage = true
                     }
                 }
             }
@@ -248,6 +247,28 @@ actor ConversationParser {
         return ""
     }
 
+    /// Extract first text content from a message line
+    private static func extractMessageContent(from json: [String: Any]) -> String? {
+        guard let message = json["message"] as? [String: Any] else { return nil }
+        if let content = message["content"] as? String {
+            return content
+        }
+        if let contentArray = message["content"] as? [[String: Any]] {
+            for block in contentArray {
+                if block["type"] as? String == "text", let text = block["text"] as? String {
+                    return text
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Strip XML tags but keep inner text (e.g. "<user_message>hello</user_message>" → "hello")
+    private static func stripXMLTags(_ text: String) -> String {
+        text.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// Truncate message for display
     private static func truncateMessage(_ message: String?, maxLength: Int = 80) -> String? {
         guard let msg = message else { return nil }
@@ -263,7 +284,7 @@ actor ConversationParser {
 
     /// Parse full conversation history for chat view (returns ALL messages - use sparingly)
     func parseFullConversation(sessionId: String, cwd: String) -> [ChatMessage] {
-        let sessionFile = Self.sessionFilePath(sessionId: sessionId, cwd: cwd)
+        let sessionFile = resolveSessionFilePath(sessionId: sessionId, cwd: cwd)
 
         guard FileManager.default.fileExists(atPath: sessionFile) else {
             return []
@@ -288,7 +309,7 @@ actor ConversationParser {
 
     /// Parse only NEW messages since last call (efficient incremental updates)
     func parseIncremental(sessionId: String, cwd: String) -> IncrementalParseResult {
-        let sessionFile = Self.sessionFilePath(sessionId: sessionId, cwd: cwd)
+        let sessionFile = resolveSessionFilePath(sessionId: sessionId, cwd: cwd)
 
         guard FileManager.default.fileExists(atPath: sessionFile) else {
             return IncrementalParseResult(
@@ -412,7 +433,8 @@ actor ConversationParser {
                         }
                     }
                 }
-            } else if line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\"") {
+            } else if line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\"") ||
+                      line.contains("\"role\":\"user\"") || line.contains("\"role\":\"assistant\"") {
                 if let lineData = line.data(using: .utf8),
                    let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
                    let message = parseMessageLine(json, seenToolIds: &state.seenToolIds, toolIdToName: &state.toolIdToName) {
@@ -457,21 +479,61 @@ actor ConversationParser {
         return true
     }
 
+    /// Register an explicit transcript path for a session (e.g. from Cursor hook data)
+    func setTranscriptPath(_ path: String, for sessionId: String) {
+        transcriptPaths[sessionId] = path
+    }
+
+    /// Get the registered transcript path for a session (if any)
+    func getTranscriptPath(for sessionId: String) -> String? {
+        transcriptPaths[sessionId]
+    }
+
     /// Build session file path
+    /// Uses explicit transcript path if registered, otherwise constructs from cwd
+    private func resolveSessionFilePath(sessionId: String, cwd: String) -> String {
+        // 1. Use explicit transcript path if registered (Cursor provides this)
+        if let explicit = transcriptPaths[sessionId] {
+            if FileManager.default.fileExists(atPath: explicit) {
+                return explicit
+            }
+        }
+
+        return Self.sessionFilePath(sessionId: sessionId, cwd: cwd)
+    }
+
+    /// Build session file path from cwd — tries ~/.claude and ~/.cursor paths
     private static func sessionFilePath(sessionId: String, cwd: String) -> String {
-        let projectDir = cwd.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
-        return NSHomeDirectory() + "/.claude/projects/" + projectDir + "/" + sessionId + ".jsonl"
+        let projectDir = cwd.trimmingCharacters(in: CharacterSet(charactersIn: "/")).replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
+
+        // Try ~/.claude paths first (Claude Code)
+        let claudeBase = NSHomeDirectory() + "/.claude/projects/" + projectDir
+        let claudeTranscriptPath = claudeBase + "/agent-transcripts/" + sessionId + ".jsonl"
+        if FileManager.default.fileExists(atPath: claudeTranscriptPath) {
+            return claudeTranscriptPath
+        }
+        let claudeDirectPath = claudeBase + "/" + sessionId + ".jsonl"
+        if FileManager.default.fileExists(atPath: claudeDirectPath) {
+            return claudeDirectPath
+        }
+
+        // Try ~/.cursor paths (Cursor IDE)
+        let cursorBase = NSHomeDirectory() + "/.cursor/projects/" + projectDir
+        let cursorTranscriptPath = cursorBase + "/agent-transcripts/" + sessionId + ".jsonl"
+        if FileManager.default.fileExists(atPath: cursorTranscriptPath) {
+            return cursorTranscriptPath
+        }
+
+        // Default to Claude transcript path (will be created if session is new)
+        return claudeTranscriptPath
     }
 
     private func parseMessageLine(_ json: [String: Any], seenToolIds: inout Set<String>, toolIdToName: inout [String: String]) -> ChatMessage? {
-        guard let type = json["type"] as? String,
-              let uuid = json["uuid"] as? String else {
+        let type = (json["type"] as? String) ?? (json["role"] as? String)
+        guard let roleType = type, roleType == "user" || roleType == "assistant" else {
             return nil
         }
-
-        guard type == "user" || type == "assistant" else {
-            return nil
-        }
+        let uuid = (json["uuid"] as? String) ?? UUID().uuidString
 
         if json["isMeta"] as? Bool == true {
             return nil
@@ -539,7 +601,7 @@ actor ConversationParser {
 
         guard !blocks.isEmpty else { return nil }
 
-        let role: ChatRole = type == "user" ? .user : .assistant
+        let role: ChatRole = roleType == "user" ? .user : .assistant
 
         return ChatMessage(
             id: uuid,
@@ -884,11 +946,19 @@ actor ConversationParser {
     // MARK: - Subagent Tools Parsing
 
     /// Parse subagent tools from an agent JSONL file
-    func parseSubagentTools(agentId: String, cwd: String) -> [SubagentToolInfo] {
+    func parseSubagentTools(agentId: String, cwd: String, sessionId: String? = nil) -> [SubagentToolInfo] {
         guard !agentId.isEmpty else { return [] }
 
-        let projectDir = cwd.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
-        let agentFile = NSHomeDirectory() + "/.claude/projects/" + projectDir + "/agent-" + agentId + ".jsonl"
+        let agentFile: String
+        if let sid = sessionId, let transcriptPath = transcriptPaths[sid] {
+            // Derive base directory from transcript path
+            let baseDir = (transcriptPath as NSString).deletingLastPathComponent
+            let parentDir = (baseDir as NSString).deletingLastPathComponent
+            agentFile = parentDir + "/agent-" + agentId + ".jsonl"
+        } else {
+            let projectDir = cwd.trimmingCharacters(in: CharacterSet(charactersIn: "/")).replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
+            agentFile = NSHomeDirectory() + "/.claude/projects/" + projectDir + "/agent-" + agentId + ".jsonl"
+        }
 
         guard FileManager.default.fileExists(atPath: agentFile),
               let content = try? String(contentsOfFile: agentFile, encoding: .utf8) else {
@@ -976,11 +1046,18 @@ struct SubagentToolInfo: Sendable {
 
 extension ConversationParser {
     /// Parse subagent tools from an agent JSONL file (static, synchronous version)
-    nonisolated static func parseSubagentToolsSync(agentId: String, cwd: String) -> [SubagentToolInfo] {
+    nonisolated static func parseSubagentToolsSync(agentId: String, cwd: String, transcriptPath: String? = nil) -> [SubagentToolInfo] {
         guard !agentId.isEmpty else { return [] }
 
-        let projectDir = cwd.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
-        let agentFile = NSHomeDirectory() + "/.claude/projects/" + projectDir + "/agent-" + agentId + ".jsonl"
+        let agentFile: String
+        if let transcriptPath = transcriptPath {
+            let baseDir = (transcriptPath as NSString).deletingLastPathComponent
+            let parentDir = (baseDir as NSString).deletingLastPathComponent
+            agentFile = parentDir + "/agent-" + agentId + ".jsonl"
+        } else {
+            let projectDir = cwd.trimmingCharacters(in: CharacterSet(charactersIn: "/")).replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
+            agentFile = NSHomeDirectory() + "/.claude/projects/" + projectDir + "/agent-" + agentId + ".jsonl"
+        }
 
         guard FileManager.default.fileExists(atPath: agentFile),
               let content = try? String(contentsOfFile: agentFile, encoding: .utf8) else {

@@ -17,11 +17,11 @@ struct SessionState: Equatable, Identifiable, Sendable {
     let cwd: String
     let projectName: String
 
-    // MARK: - Instance Metadata
+    /// Which agent tool owns this session
+    let agentType: AgentType
 
-    var pid: Int?
-    var tty: String?
-    var isInTmux: Bool
+    /// Transcript file path (Cursor provides this directly)
+    let transcriptPath: String?
 
     // MARK: - State Machine
 
@@ -68,9 +68,8 @@ struct SessionState: Equatable, Identifiable, Sendable {
         sessionId: String,
         cwd: String,
         projectName: String? = nil,
-        pid: Int? = nil,
-        tty: String? = nil,
-        isInTmux: Bool = false,
+        agentType: AgentType = .claude,
+        transcriptPath: String? = nil,
         phase: SessionPhase = .idle,
         chatItems: [ChatHistoryItem] = [],
         toolTracker: ToolTracker = ToolTracker(),
@@ -85,10 +84,25 @@ struct SessionState: Equatable, Identifiable, Sendable {
     ) {
         self.sessionId = sessionId
         self.cwd = cwd
-        self.projectName = projectName ?? URL(fileURLWithPath: cwd).lastPathComponent
-        self.pid = pid
-        self.tty = tty
-        self.isInTmux = isInTmux
+        self.agentType = agentType
+        self.transcriptPath = transcriptPath
+
+        // Derive project name: explicit > from cwd > from transcript path
+        if let pn = projectName {
+            self.projectName = pn
+        } else if !cwd.isEmpty && cwd != "/" {
+            self.projectName = URL(fileURLWithPath: cwd).lastPathComponent
+        } else if let tp = transcriptPath {
+            // e.g. /Users/x/.cursor/projects/Users-x-Dev-myproject/agent-transcripts/abc.jsonl
+            // Go up to projects dir, take the project dir name
+            let parentDir = (tp as NSString).deletingLastPathComponent  // agent-transcripts/
+            let projectDir = (parentDir as NSString).deletingLastPathComponent  // project dir
+            let dirName = (projectDir as NSString).lastPathComponent
+            // Convert back: "Users-x-Dev-myproject" → just use last segment after last "-Dev-" or use as-is
+            self.projectName = dirName
+        } else {
+            self.projectName = URL(fileURLWithPath: cwd).lastPathComponent
+        }
         self.phase = phase
         self.chatItems = chatItems
         self.toolTracker = toolTracker
@@ -106,23 +120,10 @@ struct SessionState: Equatable, Identifiable, Sendable {
         phase.needsAttention
     }
 
-    /// The active permission context, if any
-    var activePermission: PermissionContext? {
-        if case .waitingForApproval(let ctx) = phase {
-            return ctx
-        }
-        return nil
-    }
-
     // MARK: - UI Convenience Properties
 
-    /// Stable identity for SwiftUI (combines PID and sessionId for animation stability)
-    var stableId: String {
-        if let pid = pid {
-            return "\(pid)-\(sessionId)"
-        }
-        return sessionId
-    }
+    /// Stable identity for SwiftUI (for animation stability)
+    var stableId: String { sessionId }
 
     /// Display title: summary > first user message > project name
     var displayTitle: String {
@@ -132,21 +133,6 @@ struct SessionState: Equatable, Identifiable, Sendable {
     /// Best hint for matching window title
     var windowHint: String {
         conversationInfo.summary ?? projectName
-    }
-
-    /// Pending tool name if waiting for approval
-    var pendingToolName: String? {
-        activePermission?.toolName
-    }
-
-    /// Pending tool use ID
-    var pendingToolId: String? {
-        activePermission?.toolUseId
-    }
-
-    /// Formatted pending tool input for display
-    var pendingToolInput: String? {
-        activePermission?.formattedInput
     }
 
     /// Last message content
@@ -252,7 +238,6 @@ struct ToolInProgress: Equatable, Sendable {
 enum ToolInProgressPhase: Equatable, Sendable {
     case starting
     case running
-    case pendingApproval
 }
 
 // MARK: - Subagent State

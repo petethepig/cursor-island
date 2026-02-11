@@ -41,17 +41,6 @@ struct ChatView: View {
         self._hasLoadedOnce = State(initialValue: alreadyLoaded)
     }
 
-    /// Whether we're waiting for approval
-    private var isWaitingForApproval: Bool {
-        session.phase.isWaitingForApproval
-    }
-
-    /// Extract the tool name if waiting for approval
-    private var approvalTool: String? {
-        session.phase.approvalToolName
-    }
-
-    
     var body: some View {
         ZStack {
             VStack(spacing: 0) {
@@ -67,29 +56,10 @@ struct ChatView: View {
                     messageList
                 }
 
-                // Approval bar, interactive prompt, or Input bar
-                if let tool = approvalTool {
-                    if tool == "AskUserQuestion" {
-                        // Interactive tools - show prompt to answer in terminal
-                        interactivePromptBar
-                            .transition(.asymmetric(
-                                insertion: .opacity.combined(with: .move(edge: .bottom)),
-                                removal: .opacity
-                            ))
-                    } else {
-                        approvalBar(tool: tool)
-                            .transition(.asymmetric(
-                                insertion: .opacity.combined(with: .move(edge: .bottom)),
-                                removal: .opacity
-                            ))
-                    }
-                } else {
-                    inputBar
-                        .transition(.opacity)
-                }
+                inputBar
+                    .transition(.opacity)
             }
         }
-        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: isWaitingForApproval)
         .animation(nil, value: viewModel.status)
         .task {
             // Skip if already loaded (prevents redundant work on view recreation)
@@ -146,17 +116,7 @@ struct ChatView: View {
         .onReceive(sessionMonitor.$instances) { sessions in
             if let updated = sessions.first(where: { $0.sessionId == sessionId }),
                updated != session {
-                // Check if permission was just accepted (transition from waitingForApproval to processing)
-                let wasWaiting = isWaitingForApproval
                 session = updated
-                let isNowProcessing = updated.phase == .processing
-
-                if wasWaiting && isNowProcessing {
-                    // Scroll to bottom after permission accepted (with slight delay)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                        shouldScrollToBottom = true
-                    }
-                }
             }
         }
         .onChange(of: canSendMessages) { _, canSend in
@@ -354,13 +314,11 @@ struct ChatView: View {
     // MARK: - Input Bar
 
     /// Can send messages only if session is in tmux
-    private var canSendMessages: Bool {
-        session.isInTmux && session.tty != nil
-    }
+    private var canSendMessages: Bool { false }
 
     private var inputBar: some View {
         HStack(spacing: 10) {
-            TextField(canSendMessages ? "Message Claude..." : "Open Claude Code in tmux to enable messaging", text: $inputText)
+            TextField(canSendMessages ? "Message Claude..." : "Terminal messaging not available", text: $inputText)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
                 .foregroundColor(canSendMessages ? .white : .white.opacity(0.4))
@@ -406,23 +364,12 @@ struct ChatView: View {
         .zIndex(1) // Render above message list
     }
 
-    // MARK: - Approval Bar
-
-    private func approvalBar(tool: String) -> some View {
-        ChatApprovalBar(
-            tool: tool,
-            toolInput: session.pendingToolInput,
-            onApprove: { approvePermission() },
-            onDeny: { denyPermission() }
-        )
-    }
-
     // MARK: - Interactive Prompt Bar
 
     /// Bar for interactive tools like AskUserQuestion that need terminal input
     private var interactivePromptBar: some View {
         ChatInteractivePromptBar(
-            isInTmux: session.isInTmux,
+            isInTmux: false,
             onGoToTerminal: { focusTerminal() }
         )
     }
@@ -446,20 +393,8 @@ struct ChatView: View {
 
     private func focusTerminal() {
         Task {
-            if let pid = session.pid {
-                _ = await YabaiController.shared.focusWindow(forClaudePid: pid)
-            } else {
-                _ = await YabaiController.shared.focusWindow(forWorkingDirectory: session.cwd)
-            }
+            _ = await YabaiController.shared.focusWindow(forWorkingDirectory: session.cwd)
         }
-    }
-
-    private func approvePermission() {
-        sessionMonitor.approvePermission(sessionId: sessionId)
-    }
-
-    private func denyPermission() {
-        sessionMonitor.denyPermission(sessionId: sessionId, reason: nil)
     }
 
     private func sendMessage() {
@@ -479,12 +414,7 @@ struct ChatView: View {
     }
 
     private func sendToSession(_ text: String) async {
-        guard session.isInTmux else { return }
-        guard let tty = session.tty else { return }
-
-        if let target = await findTmuxTarget(tty: tty) {
-            _ = await ToolApprovalHandler.shared.sendMessage(text, to: target)
-        }
+        // tmux send is unavailable
     }
 
     private func findTmuxTarget(tty: String) async -> TmuxTarget? {
@@ -632,8 +562,6 @@ struct ToolCallView: View {
         switch tool.status {
         case .running:
             return Color.white
-        case .waitingForApproval:
-            return Color.orange
         case .success:
             return Color.green
         case .error, .interrupted:
@@ -645,8 +573,6 @@ struct ToolCallView: View {
         switch tool.status {
         case .running:
             return .white.opacity(0.6)
-        case .waitingForApproval:
-            return Color.orange.opacity(0.9)
         case .success:
             return .white.opacity(0.7)
         case .error, .interrupted:
@@ -680,11 +606,11 @@ struct ToolCallView: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Circle()
-                    .fill(statusColor.opacity(tool.status == .running || tool.status == .waitingForApproval ? pulseOpacity : 0.6))
+                    .fill(statusColor.opacity(tool.status == .running ? pulseOpacity : 0.6))
                     .frame(width: 6, height: 6)
                     .id(tool.status)  // Forces view recreation, cancelling repeatForever animation
                     .onAppear {
-                        if tool.status == .running || tool.status == .waitingForApproval {
+                        if tool.status == .running {
                             startPulsing()
                         }
                     }
@@ -726,7 +652,7 @@ struct ToolCallView: View {
                 Spacer()
 
                 // Expand indicator (only for expandable tools)
-                if canExpand && tool.status != .running && tool.status != .waitingForApproval {
+                if canExpand && tool.status != .running {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 9, weight: .medium))
                         .foregroundColor(.white.opacity(0.3))
@@ -829,7 +755,7 @@ struct SubagentToolRow: View {
 
     private var statusColor: Color {
         switch tool.status {
-        case .running, .waitingForApproval: return .orange
+        case .running: return .orange
         case .success: return .green
         case .error, .interrupted: return .red
         }

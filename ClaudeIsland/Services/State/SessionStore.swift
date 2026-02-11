@@ -8,7 +8,6 @@
 
 import Combine
 import Foundation
-import Mixpanel
 import os.log
 
 /// Central state manager for all Claude sessions
@@ -54,15 +53,6 @@ actor SessionStore {
         case .hookReceived(let hookEvent):
             await processHookEvent(hookEvent)
 
-        case .permissionApproved(let sessionId, let toolUseId):
-            await processPermissionApproved(sessionId: sessionId, toolUseId: toolUseId)
-
-        case .permissionDenied(let sessionId, let toolUseId, let reason):
-            await processPermissionDenied(sessionId: sessionId, toolUseId: toolUseId, reason: reason)
-
-        case .permissionSocketFailed(let sessionId, let toolUseId):
-            await processSocketFailure(sessionId: sessionId, toolUseId: toolUseId)
-
         case .fileUpdated(let payload):
             await processFileUpdate(payload)
 
@@ -104,10 +94,6 @@ actor SessionStore {
 
         case .subagentStopped(let sessionId, let taskToolId):
             processSubagentStopped(sessionId: sessionId, taskToolId: taskToolId)
-
-        case .agentFileUpdated:
-            // No longer used - subagent tools are populated from JSONL completion
-            break
         }
 
         publishState()
@@ -120,20 +106,12 @@ actor SessionStore {
         let isNewSession = sessions[sessionId] == nil
         var session = sessions[sessionId] ?? createSession(from: event)
 
-        // Track new session in Mixpanel
-        if isNewSession {
-            Mixpanel.mainInstance().track(event: "Session Started")
-        }
-
-        session.pid = event.pid
-        if let pid = event.pid {
-            let tree = ProcessTreeBuilder.shared.buildTree()
-            session.isInTmux = ProcessTreeBuilder.shared.isInTmux(pid: pid, tree: tree)
-        }
-        if let tty = event.tty {
-            session.tty = tty.replacingOccurrences(of: "/dev/", with: "")
-        }
         session.lastActivity = Date()
+
+        // Register transcript path with ConversationParser (Cursor provides this)
+        if let transcriptPath = event.transcriptPath ?? session.transcriptPath {
+            await ConversationParser.shared.setTranscriptPath(transcriptPath, for: sessionId)
+        }
 
         if event.status == "ended" {
             sessions.removeValue(forKey: sessionId)
@@ -149,15 +127,10 @@ actor SessionStore {
             Self.logger.debug("Invalid transition: \(String(describing: session.phase), privacy: .public) -> \(String(describing: newPhase), privacy: .public), ignoring")
         }
 
-        if event.event == "PermissionRequest", let toolUseId = event.toolUseId {
-            Self.logger.debug("Setting tool \(toolUseId.prefix(12), privacy: .public) status to waitingForApproval")
-            updateToolStatus(in: &session, toolId: toolUseId, status: .waitingForApproval)
-        }
-
         processToolTracking(event: event, session: &session)
         processSubagentTracking(event: event, session: &session)
 
-        if event.event == "Stop" {
+        if event.event == "stop" {
             session.subagentState = SubagentState()
         }
 
@@ -174,16 +147,15 @@ actor SessionStore {
             sessionId: event.sessionId,
             cwd: event.cwd,
             projectName: URL(fileURLWithPath: event.cwd).lastPathComponent,
-            pid: event.pid,
-            tty: event.tty?.replacingOccurrences(of: "/dev/", with: ""),
-            isInTmux: false,  // Will be updated
+            agentType: event.agentType ?? .claude,
+            transcriptPath: event.transcriptPath,
             phase: .idle
         )
     }
 
     private func processToolTracking(event: HookEvent, session: inout SessionState) {
         switch event.event {
-        case "PreToolUse":
+        case "preToolUse":
             if let toolUseId = event.toolUseId, let toolName = event.tool {
                 session.toolTracker.startTool(id: toolUseId, name: toolName)
 
@@ -226,7 +198,7 @@ actor SessionStore {
                 }
             }
 
-        case "PostToolUse":
+        case "postToolUse":
             if let toolUseId = event.toolUseId {
                 session.toolTracker.completeTool(id: toolUseId, success: true)
                 // Update chatItem status - tool completed (possibly approved via terminal)
@@ -234,7 +206,7 @@ actor SessionStore {
                 for i in 0..<session.chatItems.count {
                     if session.chatItems[i].id == toolUseId,
                        case .toolCall(var tool) = session.chatItems[i].type,
-                       tool.status == .waitingForApproval || tool.status == .running {
+                       tool.status == .running {
                         tool.status = .success
                         session.chatItems[i] = ChatHistoryItem(
                             id: toolUseId,
@@ -253,22 +225,22 @@ actor SessionStore {
 
     private func processSubagentTracking(event: HookEvent, session: inout SessionState) {
         switch event.event {
-        case "PreToolUse":
+        case "preToolUse":
             if event.tool == "Task", let toolUseId = event.toolUseId {
                 let description = event.toolInput?["description"]?.value as? String
                 session.subagentState.startTask(taskToolId: toolUseId, description: description)
                 Self.logger.debug("Started Task subagent tracking: \(toolUseId.prefix(12), privacy: .public)")
             }
 
-        case "PostToolUse":
+        case "postToolUse":
             if event.tool == "Task" {
                 Self.logger.debug("PostToolUse for Task received (subagent still running)")
             }
 
-        case "SubagentStop":
-            // SubagentStop fires when a subagent completes - stop tracking
+        case "subagentStop":
+            // subagentStop fires when a subagent completes - stop tracking
             // Subagent tools are populated from agent file in processFileUpdated
-            Self.logger.debug("SubagentStop received")
+            Self.logger.debug("subagentStop received")
 
         default:
             break
@@ -314,45 +286,6 @@ actor SessionStore {
         return formatter.date(from: str)
     }
 
-    // MARK: - Permission Processing
-
-    private func processPermissionApproved(sessionId: String, toolUseId: String) async {
-        guard var session = sessions[sessionId] else { return }
-
-        // Update tool status in chat history first
-        updateToolStatus(in: &session, toolId: toolUseId, status: .running)
-
-        // Check if there are other tools still waiting for approval
-        if let nextPending = findNextPendingTool(in: session, excluding: toolUseId) {
-            // Another tool is waiting - stay in waitingForApproval with that tool's context
-            let newPhase = SessionPhase.waitingForApproval(PermissionContext(
-                toolUseId: nextPending.id,
-                toolName: nextPending.name,
-                toolInput: nil,  // We don't have the input stored in chatItems
-                receivedAt: nextPending.timestamp
-            ))
-            if session.phase.canTransition(to: newPhase) {
-                session.phase = newPhase
-                Self.logger.debug("Switched to next pending tool: \(nextPending.id.prefix(12), privacy: .public)")
-            }
-        } else {
-            // No more pending tools - transition to processing
-            if case .waitingForApproval(let ctx) = session.phase, ctx.toolUseId == toolUseId {
-                if session.phase.canTransition(to: .processing) {
-                    session.phase = .processing
-                }
-            } else if case .waitingForApproval = session.phase {
-                // The approved tool wasn't the one in phase context, but no others pending
-                // This can happen if tools were approved out of order
-                if session.phase.canTransition(to: .processing) {
-                    session.phase = .processing
-                }
-            }
-        }
-
-        sessions[sessionId] = session
-    }
-
     // MARK: - Tool Completion Processing
 
     /// Process a tool completion event (from JSONL detection)
@@ -382,104 +315,6 @@ actor SessionStore {
                 )
                 Self.logger.debug("Tool \(toolUseId.prefix(12), privacy: .public) completed with status: \(String(describing: result.status), privacy: .public)")
                 break
-            }
-        }
-
-        // Update session phase if needed
-        // If the completed tool was the one in the phase context, switch to next pending or processing
-        if case .waitingForApproval(let ctx) = session.phase, ctx.toolUseId == toolUseId {
-            if let nextPending = findNextPendingTool(in: session, excluding: toolUseId) {
-                let newPhase = SessionPhase.waitingForApproval(PermissionContext(
-                    toolUseId: nextPending.id,
-                    toolName: nextPending.name,
-                    toolInput: nil,
-                    receivedAt: nextPending.timestamp
-                ))
-                session.phase = newPhase
-                Self.logger.debug("Switched to next pending tool after completion: \(nextPending.id.prefix(12), privacy: .public)")
-            } else {
-                if session.phase.canTransition(to: .processing) {
-                    session.phase = .processing
-                }
-            }
-        }
-
-        sessions[sessionId] = session
-    }
-
-    /// Find the next tool waiting for approval (excluding a specific tool ID)
-    private func findNextPendingTool(in session: SessionState, excluding toolId: String) -> (id: String, name: String, timestamp: Date)? {
-        for item in session.chatItems {
-            if item.id == toolId { continue }
-            if case .toolCall(let tool) = item.type, tool.status == .waitingForApproval {
-                return (id: item.id, name: tool.name, timestamp: item.timestamp)
-            }
-        }
-        return nil
-    }
-
-    private func processPermissionDenied(sessionId: String, toolUseId: String, reason: String?) async {
-        guard var session = sessions[sessionId] else { return }
-
-        // Update tool status in chat history first
-        updateToolStatus(in: &session, toolId: toolUseId, status: .error)
-
-        // Check if there are other tools still waiting for approval
-        if let nextPending = findNextPendingTool(in: session, excluding: toolUseId) {
-            // Another tool is waiting - stay in waitingForApproval with that tool's context
-            let newPhase = SessionPhase.waitingForApproval(PermissionContext(
-                toolUseId: nextPending.id,
-                toolName: nextPending.name,
-                toolInput: nil,
-                receivedAt: nextPending.timestamp
-            ))
-            if session.phase.canTransition(to: newPhase) {
-                session.phase = newPhase
-                Self.logger.debug("Switched to next pending tool after denial: \(nextPending.id.prefix(12), privacy: .public)")
-            }
-        } else {
-            // No more pending tools - transition to processing (Claude will handle denial)
-            if case .waitingForApproval(let ctx) = session.phase, ctx.toolUseId == toolUseId {
-                if session.phase.canTransition(to: .processing) {
-                    session.phase = .processing
-                }
-            } else if case .waitingForApproval = session.phase {
-                // The denied tool wasn't the one in phase context, but no others pending
-                if session.phase.canTransition(to: .processing) {
-                    session.phase = .processing
-                }
-            }
-        }
-
-        sessions[sessionId] = session
-    }
-
-    private func processSocketFailure(sessionId: String, toolUseId: String) async {
-        guard var session = sessions[sessionId] else { return }
-
-        // Mark the failed tool's status as error
-        updateToolStatus(in: &session, toolId: toolUseId, status: .error)
-
-        // Check if there are other tools still waiting for approval
-        if let nextPending = findNextPendingTool(in: session, excluding: toolUseId) {
-            // Another tool is waiting - switch to that tool's context
-            let newPhase = SessionPhase.waitingForApproval(PermissionContext(
-                toolUseId: nextPending.id,
-                toolName: nextPending.name,
-                toolInput: nil,
-                receivedAt: nextPending.timestamp
-            ))
-            if session.phase.canTransition(to: newPhase) {
-                session.phase = newPhase
-                Self.logger.debug("Switched to next pending tool after socket failure: \(nextPending.id.prefix(12), privacy: .public)")
-            }
-        } else {
-            // No more pending tools - clear permission state
-            if case .waitingForApproval(let ctx) = session.phase, ctx.toolUseId == toolUseId {
-                session.phase = .idle
-            } else if case .waitingForApproval = session.phase {
-                // The failed tool wasn't in phase context, but no others pending
-                session.phase = .idle
             }
         }
 
@@ -659,7 +494,8 @@ actor SessionStore {
 
             let subagentToolInfos = await ConversationParser.shared.parseSubagentTools(
                 agentId: taskResult.agentId,
-                cwd: cwd
+                cwd: cwd,
+                sessionId: session.sessionId
             )
 
             guard !subagentToolInfos.isEmpty else { continue }
@@ -696,7 +532,7 @@ actor SessionStore {
             guard case .toolCall(let tool) = item.type else { continue }
 
             // Only emit for tools that are running or waiting but have results in JSONL
-            guard tool.status == .running || tool.status == .waitingForApproval else { continue }
+            guard tool.status == .running else { continue }
             guard completedToolIds.contains(item.id) else { continue }
 
             let result = ToolCompletionResult.from(
@@ -972,15 +808,6 @@ actor SessionStore {
     /// Get a specific session
     func session(for sessionId: String) -> SessionState? {
         sessions[sessionId]
-    }
-
-    /// Check if there's an active permission for a session
-    func hasActivePermission(sessionId: String) -> Bool {
-        guard let session = sessions[sessionId] else { return false }
-        if case .waitingForApproval = session.phase {
-            return true
-        }
-        return false
     }
 
     /// Get all current sessions

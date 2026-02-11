@@ -34,11 +34,6 @@ struct NotchView: View {
         sessionMonitor.instances.contains { $0.phase == .processing || $0.phase == .compacting }
     }
 
-    /// Whether any Claude session has a pending permission request
-    private var hasPendingPermission: Bool {
-        sessionMonitor.instances.contains { $0.phase.isWaitingForApproval }
-    }
-
     /// Whether any Claude session is waiting for user input (done/ready state) within the display window
     private var hasWaitingForInput: Bool {
         let now = Date()
@@ -65,26 +60,17 @@ struct NotchView: View {
 
     /// Extra width for expanding activities (like Dynamic Island)
     private var expansionWidth: CGFloat {
-        // Permission indicator adds width on left side only
-        let permissionIndicatorWidth: CGFloat = hasPendingPermission ? 18 : 0
-
         // Expand for processing activity
         if activityCoordinator.expandingActivity.show {
             switch activityCoordinator.expandingActivity.type {
             case .claude:
-                let baseWidth = 2 * max(0, closedNotchSize.height - 12) + 20
-                return baseWidth + permissionIndicatorWidth
+                return 2 * max(0, closedNotchSize.height - 12) + 20
             case .none:
                 break
             }
         }
 
-        // Expand for pending permissions (left indicator) or waiting for input (checkmark on right)
-        if hasPendingPermission {
-            return 2 * max(0, closedNotchSize.height - 12) + 20 + permissionIndicatorWidth
-        }
-
-        // Waiting for input just shows checkmark on right, no extra left indicator
+        // Waiting for input shows checkmark on right
         if hasWaitingForInput {
             return 2 * max(0, closedNotchSize.height - 12) + 20
         }
@@ -169,7 +155,7 @@ struct NotchView: View {
                     .animation(viewModel.status == .opened ? openAnimation : closeAnimation, value: viewModel.status)
                     .animation(openAnimation, value: notchSize) // Animate container size changes between content types
                     .animation(.smooth, value: activityCoordinator.expandingActivity)
-                    .animation(.smooth, value: hasPendingPermission)
+                    .animation(.smooth, value: hasWaitingForInput)
                     .animation(.smooth, value: hasWaitingForInput)
                     .animation(.spring(response: 0.3, dampingFraction: 0.5), value: isBouncing)
                     .contentShape(Rectangle())
@@ -215,7 +201,7 @@ struct NotchView: View {
 
     /// Whether to show the expanded closed state (processing, pending permission, or waiting for input)
     private var showClosedActivity: Bool {
-        isProcessing || hasPendingPermission || hasWaitingForInput
+        isProcessing || hasWaitingForInput
     }
 
     @ViewBuilder
@@ -252,13 +238,8 @@ struct NotchView: View {
                     ClaudeCrabIcon(size: 14, animateLegs: isProcessing)
                         .matchedGeometryEffect(id: "crab", in: activityNamespace, isSource: showClosedActivity)
 
-                    // Permission indicator only (amber) - waiting for input shows checkmark on right
-                    if hasPendingPermission {
-                        PermissionIndicatorIcon(size: 14, color: Color(red: 0.85, green: 0.47, blue: 0.34))
-                            .matchedGeometryEffect(id: "status-indicator", in: activityNamespace, isSource: showClosedActivity)
-                    }
                 }
-                .frame(width: viewModel.status == .opened ? nil : sideWidth + (hasPendingPermission ? 18 : 0))
+                .frame(width: viewModel.status == .opened ? nil : sideWidth)
                 .padding(.leading, viewModel.status == .opened ? 8 : 0)
             }
 
@@ -280,7 +261,7 @@ struct NotchView: View {
 
             // Right side - spinner when processing/pending, checkmark when waiting for input
             if showClosedActivity {
-                if isProcessing || hasPendingPermission {
+                if isProcessing {
                     ProcessingSpinner()
                         .matchedGeometryEffect(id: "spinner", in: activityNamespace, isSource: showClosedActivity)
                         .frame(width: viewModel.status == .opened ? 20 : sideWidth)
@@ -372,7 +353,7 @@ struct NotchView: View {
     // MARK: - Event Handlers
 
     private func handleProcessingChange() {
-        if isAnyProcessing || hasPendingPermission {
+        if isAnyProcessing {
             // Show claude activity when processing or waiting for permission
             activityCoordinator.showActivity(type: .claude)
             isVisible = true
@@ -388,7 +369,7 @@ struct NotchView: View {
             // Don't hide on non-notched devices - users need a visible target
             if viewModel.status == .closed && viewModel.hasPhysicalNotch {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    if !isAnyProcessing && !hasPendingPermission && !hasWaitingForInput && viewModel.status == .closed {
+                    if !isAnyProcessing && !hasWaitingForInput && viewModel.status == .closed {
                         isVisible = false
                     }
                 }
@@ -408,7 +389,7 @@ struct NotchView: View {
             // Don't hide on non-notched devices - users need a visible target
             guard viewModel.hasPhysicalNotch else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                if viewModel.status == .closed && !isAnyProcessing && !hasPendingPermission && !hasWaitingForInput && !activityCoordinator.expandingActivity.show {
+                if viewModel.status == .closed && !isAnyProcessing && !hasWaitingForInput && !activityCoordinator.expandingActivity.show {
                     isVisible = false
                 }
             }
@@ -486,18 +467,6 @@ struct NotchView: View {
     /// Determine if notification sound should play for the given sessions
     /// Returns true if ANY session is not actively focused
     private func shouldPlayNotificationSound(for sessions: [SessionState]) async -> Bool {
-        for session in sessions {
-            guard let pid = session.pid else {
-                // No PID means we can't check focus, assume not focused
-                return true
-            }
-
-            let isFocused = await TerminalVisibilityDetector.isSessionFocused(sessionPid: pid)
-            if !isFocused {
-                return true
-            }
-        }
-
-        return false
+        true
     }
 }

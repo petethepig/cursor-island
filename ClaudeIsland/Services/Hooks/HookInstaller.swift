@@ -2,39 +2,66 @@
 //  HookInstaller.swift
 //  ClaudeIsland
 //
-//  Auto-installs Claude Code hooks on app launch
+//  Auto-installs hooks for both Claude Code CLI and Cursor IDE on app launch
 //
 
 import Foundation
 
 struct HookInstaller {
 
-    /// Install hook script and update settings.json on app launch
+    private static let claudeDirName = ".claude"
+    private static let hooksDirName = "hooks"
+
+    // Claude Code CLI uses settings.json with PascalCase event names
+    private static let claudeScriptName = "claude-island-state.py"
+    private static let settingsJSONName = "settings.json"
+
+    // Cursor IDE uses hooks.json with camelCase event names
+    private static let cursorScriptName = "cursor-island-state.py"
+    private static let hooksJSONName = "hooks.json"
+
+    /// Install hook scripts and update both config files on app launch
     static func installIfNeeded() {
         let claudeDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude")
-        let hooksDir = claudeDir.appendingPathComponent("hooks")
-        let pythonScript = hooksDir.appendingPathComponent("claude-island-state.py")
-        let settings = claudeDir.appendingPathComponent("settings.json")
+            .appendingPathComponent(claudeDirName)
+        let hooksDir = claudeDir.appendingPathComponent(hooksDirName)
+        let claudeScript = hooksDir.appendingPathComponent(claudeScriptName)
+        let cursorScript = hooksDir.appendingPathComponent(cursorScriptName)
+        let settingsJSON = claudeDir.appendingPathComponent(settingsJSONName)
+        let hooksJSON = claudeDir.appendingPathComponent(hooksJSONName)
 
         try? FileManager.default.createDirectory(
             at: hooksDir,
             withIntermediateDirectories: true
         )
 
+        // Copy Claude Code hook script
         if let bundled = Bundle.main.url(forResource: "claude-island-state", withExtension: "py") {
-            try? FileManager.default.removeItem(at: pythonScript)
-            try? FileManager.default.copyItem(at: bundled, to: pythonScript)
+            try? FileManager.default.removeItem(at: claudeScript)
+            try? FileManager.default.copyItem(at: bundled, to: claudeScript)
             try? FileManager.default.setAttributes(
                 [.posixPermissions: 0o755],
-                ofItemAtPath: pythonScript.path
+                ofItemAtPath: claudeScript.path
             )
         }
 
-        updateSettings(at: settings)
+        // Copy Cursor hook script
+        if let bundled = Bundle.main.url(forResource: "cursor-island-state", withExtension: "py") {
+            try? FileManager.default.removeItem(at: cursorScript)
+            try? FileManager.default.copyItem(at: bundled, to: cursorScript)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: cursorScript.path
+            )
+        }
+
+        updateClaudeSettings(at: settingsJSON)
+        updateCursorHooksJSON(at: hooksJSON)
     }
 
-    private static func updateSettings(at settingsURL: URL) {
+    // MARK: - Claude Code CLI: settings.json (PascalCase, nested format)
+
+    private static func updateClaudeSettings(at settingsURL: URL) {
         var json: [String: Any] = [:]
         if let data = try? Data(contentsOf: settingsURL),
            let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -42,11 +69,9 @@ struct HookInstaller {
         }
 
         let python = detectPython()
-        let command = "\(python) ~/.claude/hooks/claude-island-state.py"
+        let command = "\(python) ~/.claude/hooks/\(claudeScriptName)"
         let hookEntry: [[String: Any]] = [["type": "command", "command": command]]
-        let hookEntryWithTimeout: [[String: Any]] = [["type": "command", "command": command, "timeout": 86400]]
         let withMatcher: [[String: Any]] = [["matcher": "*", "hooks": hookEntry]]
-        let withMatcherAndTimeout: [[String: Any]] = [["matcher": "*", "hooks": hookEntryWithTimeout]]
         let withoutMatcher: [[String: Any]] = [["hooks": hookEntry]]
         let preCompactConfig: [[String: Any]] = [
             ["matcher": "auto", "hooks": hookEntry],
@@ -59,7 +84,6 @@ struct HookInstaller {
             ("UserPromptSubmit", withoutMatcher),
             ("PreToolUse", withMatcher),
             ("PostToolUse", withMatcher),
-            ("PermissionRequest", withMatcherAndTimeout),
             ("Notification", withMatcher),
             ("Stop", withoutMatcher),
             ("SubagentStop", withoutMatcher),
@@ -98,13 +122,97 @@ struct HookInstaller {
         }
     }
 
-    /// Check if hooks are currently installed
+    // MARK: - Cursor IDE: hooks.json (camelCase, flat format)
+
+    private static func updateCursorHooksJSON(at hooksURL: URL) {
+        var json: [String: Any] = ["version": 1]
+        var hooks: [String: Any] = [:]
+
+        if let data = try? Data(contentsOf: hooksURL),
+           let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let existingHooks = existing["hooks"] as? [String: Any] {
+            hooks = existingHooks
+        }
+
+        let python = detectPython()
+        let command = "\(python) ~/.claude/hooks/\(cursorScriptName)"
+
+        let hookEvents = [
+            "beforeSubmitPrompt",
+            "preToolUse",
+            "postToolUse",
+            "stop",
+            "subagentStop",
+            "sessionStart",
+            "sessionEnd",
+            "preCompact",
+        ]
+
+        for event in hookEvents {
+            var entries = hooks[event] as? [[String: Any]] ?? []
+            let hasOurHook = entries.contains { entry in
+                (entry["command"] as? String)?.contains("cursor-island-state.py") == true
+            }
+            if !hasOurHook {
+                entries.append(["command": command])
+                hooks[event] = entries
+            }
+        }
+
+        json["hooks"] = hooks
+
+        if let data = try? JSONSerialization.data(
+            withJSONObject: json,
+            options: [.prettyPrinted, .sortedKeys]
+        ) {
+            try? data.write(to: hooksURL)
+        }
+    }
+
+    // MARK: - Status
+
+    /// Check if hooks are currently installed (checks either config)
     static func isInstalled() -> Bool {
         let claudeDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude")
-        let settings = claudeDir.appendingPathComponent("settings.json")
+            .appendingPathComponent(claudeDirName)
 
-        guard let data = try? Data(contentsOf: settings),
+        // Check hooks.json (Cursor)
+        let hooksJSON = claudeDir.appendingPathComponent(hooksJSONName)
+        if checkHooksJSON(at: hooksJSON, scriptName: cursorScriptName) {
+            return true
+        }
+
+        // Check settings.json (Claude Code)
+        let settingsJSON = claudeDir.appendingPathComponent(settingsJSONName)
+        if checkSettingsJSON(at: settingsJSON, scriptName: claudeScriptName) {
+            return true
+        }
+
+        return false
+    }
+
+    private static func checkHooksJSON(at url: URL, scriptName: String) -> Bool {
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let hooks = json["hooks"] as? [String: Any] else {
+            return false
+        }
+
+        for (_, value) in hooks {
+            if let entries = value as? [[String: Any]] {
+                for entry in entries {
+                    if let cmd = entry["command"] as? String,
+                       cmd.contains(scriptName) {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
+    }
+
+    private static func checkSettingsJSON(at url: URL, scriptName: String) -> Bool {
+        guard let data = try? Data(contentsOf: url),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let hooks = json["hooks"] as? [String: Any] else {
             return false
@@ -116,7 +224,7 @@ struct HookInstaller {
                     if let entryHooks = entry["hooks"] as? [[String: Any]] {
                         for hook in entryHooks {
                             if let cmd = hook["command"] as? String,
-                               cmd.contains("claude-island-state.py") {
+                               cmd.contains(scriptName) {
                                 return true
                             }
                         }
@@ -127,17 +235,60 @@ struct HookInstaller {
         return false
     }
 
-    /// Uninstall hooks from settings.json and remove script
+    // MARK: - Uninstall
+
+    /// Uninstall hooks from both config files and remove scripts
     static func uninstall() {
         let claudeDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude")
-        let hooksDir = claudeDir.appendingPathComponent("hooks")
-        let pythonScript = hooksDir.appendingPathComponent("claude-island-state.py")
-        let settings = claudeDir.appendingPathComponent("settings.json")
+            .appendingPathComponent(claudeDirName)
+        let hooksDir = claudeDir.appendingPathComponent(hooksDirName)
 
-        try? FileManager.default.removeItem(at: pythonScript)
+        // Remove scripts
+        let claudeScript = hooksDir.appendingPathComponent(claudeScriptName)
+        let cursorScript = hooksDir.appendingPathComponent(cursorScriptName)
+        try? FileManager.default.removeItem(at: claudeScript)
+        try? FileManager.default.removeItem(at: cursorScript)
 
-        guard let data = try? Data(contentsOf: settings),
+        // Clean hooks.json (Cursor)
+        let hooksJSON = claudeDir.appendingPathComponent(hooksJSONName)
+        cleanHooksJSON(at: hooksJSON, scriptName: cursorScriptName)
+
+        // Clean settings.json (Claude Code)
+        let settingsJSON = claudeDir.appendingPathComponent(settingsJSONName)
+        cleanSettingsJSON(at: settingsJSON, scriptName: claudeScriptName)
+    }
+
+    private static func cleanHooksJSON(at url: URL, scriptName: String) {
+        guard let data = try? Data(contentsOf: url),
+              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var hooks = json["hooks"] as? [String: Any] else {
+            return
+        }
+
+        for (event, value) in hooks {
+            if var entries = value as? [[String: Any]] {
+                entries.removeAll { entry in
+                    (entry["command"] as? String)?.contains(scriptName) == true
+                }
+                if entries.isEmpty {
+                    hooks.removeValue(forKey: event)
+                } else {
+                    hooks[event] = entries
+                }
+            }
+        }
+
+        json["hooks"] = hooks
+        if let data = try? JSONSerialization.data(
+            withJSONObject: json,
+            options: [.prettyPrinted, .sortedKeys]
+        ) {
+            try? data.write(to: url)
+        }
+    }
+
+    private static func cleanSettingsJSON(at url: URL, scriptName: String) {
+        guard let data = try? Data(contentsOf: url),
               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               var hooks = json["hooks"] as? [String: Any] else {
             return
@@ -149,12 +300,11 @@ struct HookInstaller {
                     if let entryHooks = entry["hooks"] as? [[String: Any]] {
                         return entryHooks.contains { hook in
                             let cmd = hook["command"] as? String ?? ""
-                            return cmd.contains("claude-island-state.py")
+                            return cmd.contains(scriptName)
                         }
                     }
                     return false
                 }
-
                 if entries.isEmpty {
                     hooks.removeValue(forKey: event)
                 } else {
@@ -173,7 +323,7 @@ struct HookInstaller {
             withJSONObject: json,
             options: [.prettyPrinted, .sortedKeys]
         ) {
-            try? data.write(to: settings)
+            try? data.write(to: url)
         }
     }
 

@@ -16,17 +16,6 @@ enum SessionEvent: Sendable {
     /// A hook event was received from Claude Code
     case hookReceived(HookEvent)
 
-    // MARK: - Permission Events (user actions)
-
-    /// User approved a permission request
-    case permissionApproved(sessionId: String, toolUseId: String)
-
-    /// User denied a permission request
-    case permissionDenied(sessionId: String, toolUseId: String, reason: String?)
-
-    /// Permission socket failed (connection died before response)
-    case permissionSocketFailed(sessionId: String, toolUseId: String)
-
     // MARK: - File Events (from ConversationParser)
 
     /// JSONL file was updated with new content
@@ -56,9 +45,6 @@ enum SessionEvent: Sendable {
 
     /// A Task (subagent) tool has stopped
     case subagentStopped(sessionId: String, taskToolId: String)
-
-    /// Agent file was updated with new subagent tools (from AgentFileWatcher)
-    case agentFileUpdated(sessionId: String, taskToolId: String, tools: [SubagentToolInfo])
 
     // MARK: - Clear Events (from JSONL detection)
 
@@ -129,48 +115,18 @@ struct ToolCompletionResult: Sendable {
 extension HookEvent {
     /// Determine the target session phase based on this hook event
     nonisolated func determinePhase() -> SessionPhase {
-        // PreCompact takes priority
-        if event == "PreCompact" {
-            return .compacting
-        }
-
-        // Permission request creates waitingForApproval state
-        if expectsResponse, let tool = tool {
-            return .waitingForApproval(PermissionContext(
-                toolUseId: toolUseId ?? "",
-                toolName: tool,
-                toolInput: toolInput,
-                receivedAt: Date()
-            ))
-        }
-
-        if event == "Notification" && notificationType == "idle_prompt" {
-            return .idle
-        }
-
-        switch status {
-        case "waiting_for_input":
-            return .waitingForInput
-        case "running_tool", "processing", "starting":
-            return .processing
-        case "compacting":
-            return .compacting
-        case "ended":
-            return .ended
-        default:
-            return .idle
-        }
+        sessionPhase
     }
 
     /// Whether this is a tool-related event
     nonisolated var isToolEvent: Bool {
-        event == "PreToolUse" || event == "PostToolUse" || event == "PermissionRequest"
+        event == "preToolUse" || event == "postToolUse"
     }
 
     /// Whether this event should trigger a file sync
     nonisolated var shouldSyncFile: Bool {
         switch event {
-        case "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop":
+        case "beforeSubmitPrompt", "preToolUse", "postToolUse", "stop":
             return true
         default:
             return false
@@ -185,12 +141,6 @@ extension SessionEvent: CustomStringConvertible {
         switch self {
         case .hookReceived(let event):
             return "hookReceived(\(event.event), session: \(event.sessionId.prefix(8)))"
-        case .permissionApproved(let sessionId, let toolUseId):
-            return "permissionApproved(session: \(sessionId.prefix(8)), tool: \(toolUseId.prefix(12)))"
-        case .permissionDenied(let sessionId, let toolUseId, _):
-            return "permissionDenied(session: \(sessionId.prefix(8)), tool: \(toolUseId.prefix(12)))"
-        case .permissionSocketFailed(let sessionId, let toolUseId):
-            return "permissionSocketFailed(session: \(sessionId.prefix(8)), tool: \(toolUseId.prefix(12)))"
         case .fileUpdated(let payload):
             return "fileUpdated(session: \(payload.sessionId.prefix(8)), messages: \(payload.messages.count))"
         case .interruptDetected(let sessionId):
@@ -213,8 +163,6 @@ extension SessionEvent: CustomStringConvertible {
             return "subagentToolCompleted(session: \(sessionId.prefix(8)), tool: \(toolId.prefix(12)), status: \(status))"
         case .subagentStopped(let sessionId, let taskToolId):
             return "subagentStopped(session: \(sessionId.prefix(8)), task: \(taskToolId.prefix(12)))"
-        case .agentFileUpdated(let sessionId, let taskToolId, let tools):
-            return "agentFileUpdated(session: \(sessionId.prefix(8)), task: \(taskToolId.prefix(12)), tools: \(tools.count))"
         }
     }
 }

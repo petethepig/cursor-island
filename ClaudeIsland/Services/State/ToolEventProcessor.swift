@@ -138,7 +138,7 @@ enum ToolEventProcessor {
         for i in 0..<session.chatItems.count {
             if session.chatItems[i].id == toolId,
                case .toolCall(var tool) = session.chatItems[i].type,
-               tool.status == .waitingForApproval || tool.status == .running {
+               tool.status == .running {
                 tool.status = status
                 session.chatItems[i] = ChatHistoryItem(
                     id: toolId,
@@ -150,20 +150,6 @@ enum ToolEventProcessor {
         }
         let count = session.chatItems.count
         logger.warning("Tool \(toolId.prefix(16), privacy: .public) not found in chatItems (count: \(count))")
-    }
-
-    /// Find the next tool waiting for approval
-    static func findNextPendingTool(
-        in session: SessionState,
-        excluding toolId: String
-    ) -> (id: String, name: String, timestamp: Date)? {
-        for item in session.chatItems {
-            if item.id == toolId { continue }
-            if case .toolCall(let tool) = item.type, tool.status == .waitingForApproval {
-                return (id: item.id, name: tool.name, timestamp: item.timestamp)
-            }
-        }
-        return nil
     }
 
     /// Mark all running tools as interrupted

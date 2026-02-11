@@ -160,9 +160,6 @@ struct ToolCallItem: Equatable, Sendable {
         if status == .running {
             return ToolStatusDisplay.running(for: name, input: input)
         }
-        if status == .waitingForApproval {
-            return ToolStatusDisplay(text: "Waiting for approval...", isRunning: true)
-        }
         if status == .interrupted {
             return ToolStatusDisplay(text: "Interrupted", isRunning: false)
         }
@@ -182,7 +179,6 @@ struct ToolCallItem: Equatable, Sendable {
 
 enum ToolStatus: Sendable, CustomStringConvertible {
     case running
-    case waitingForApproval
     case success
     case error
     case interrupted
@@ -190,7 +186,6 @@ enum ToolStatus: Sendable, CustomStringConvertible {
     nonisolated var description: String {
         switch self {
         case .running: return "running"
-        case .waitingForApproval: return "waitingForApproval"
         case .success: return "success"
         case .error: return "error"
         case .interrupted: return "interrupted"
@@ -198,19 +193,7 @@ enum ToolStatus: Sendable, CustomStringConvertible {
     }
 }
 
-// Explicit nonisolated Equatable conformance to avoid actor isolation issues
-extension ToolStatus: Equatable {
-    nonisolated static func == (lhs: ToolStatus, rhs: ToolStatus) -> Bool {
-        switch (lhs, rhs) {
-        case (.running, .running): return true
-        case (.waitingForApproval, .waitingForApproval): return true
-        case (.success, .success): return true
-        case (.error, .error): return true
-        case (.interrupted, .interrupted): return true
-        default: return false
-        }
-    }
-}
+extension ToolStatus: Equatable {}
 
 // MARK: - Subagent Tool Call
 

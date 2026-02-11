@@ -229,8 +229,6 @@ struct StatusIcon: View {
         switch phase {
         case .waitingForInput:
             WaitingForInputIcon(size: size)
-        case .waitingForApproval:
-            WaitingForApprovalIcon(size: size)
         case .processing, .compacting:
             RunningIcon(size: size)
         case .idle, .ended:

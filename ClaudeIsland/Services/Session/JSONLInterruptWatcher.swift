@@ -37,11 +37,38 @@ class JSONLInterruptWatcher {
         "[Request interrupted by user"
     ]
 
-    init(sessionId: String, cwd: String) {
+    init(sessionId: String, cwd: String, transcriptPath: String? = nil) {
         self.sessionId = sessionId
-        let projectDir = cwd.replacingOccurrences(of: "/", with: "-")
+
+        // Use explicit transcript path if provided (Cursor)
+        if let explicit = transcriptPath, FileManager.default.fileExists(atPath: explicit) {
+            self.filePath = explicit
+            return
+        }
+
+        let projectDir = cwd.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                            .replacingOccurrences(of: "/", with: "-")
                             .replacingOccurrences(of: ".", with: "-")
-        self.filePath = NSHomeDirectory() + "/.claude/projects/" + projectDir + "/" + sessionId + ".jsonl"
+
+        // Try ~/.claude paths first (Claude Code)
+        let claudeBase = NSHomeDirectory() + "/.claude/projects/" + projectDir
+        let claudeTranscriptPath = claudeBase + "/agent-transcripts/" + sessionId + ".jsonl"
+        let claudeDirectPath = claudeBase + "/" + sessionId + ".jsonl"
+
+        if FileManager.default.fileExists(atPath: claudeTranscriptPath) {
+            self.filePath = claudeTranscriptPath
+        } else if FileManager.default.fileExists(atPath: claudeDirectPath) {
+            self.filePath = claudeDirectPath
+        } else {
+            // Try ~/.cursor paths (Cursor IDE)
+            let cursorBase = NSHomeDirectory() + "/.cursor/projects/" + projectDir
+            let cursorTranscriptPath = cursorBase + "/agent-transcripts/" + sessionId + ".jsonl"
+            if FileManager.default.fileExists(atPath: cursorTranscriptPath) {
+                self.filePath = cursorTranscriptPath
+            } else {
+                self.filePath = claudeTranscriptPath  // Default for new sessions
+            }
+        }
     }
 
     /// Start watching the JSONL file for interrupts
@@ -185,10 +212,10 @@ class InterruptWatcherManager {
 
     private init() {}
 
-    func startWatching(sessionId: String, cwd: String) {
+    func startWatching(sessionId: String, cwd: String, transcriptPath: String? = nil) {
         guard watchers[sessionId] == nil else { return }
 
-        let watcher = JSONLInterruptWatcher(sessionId: sessionId, cwd: cwd)
+        let watcher = JSONLInterruptWatcher(sessionId: sessionId, cwd: cwd, transcriptPath: transcriptPath)
         watcher.delegate = delegate
         watcher.start()
         watchers[sessionId] = watcher

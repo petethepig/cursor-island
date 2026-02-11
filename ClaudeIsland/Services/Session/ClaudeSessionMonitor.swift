@@ -31,86 +31,31 @@ class ClaudeSessionMonitor: ObservableObject {
     // MARK: - Monitoring Lifecycle
 
     func startMonitoring() {
-        HookSocketServer.shared.start(
-            onEvent: { event in
-                Task {
-                    await SessionStore.shared.process(.hookReceived(event))
-                }
+        HookSocketServer.shared.start(onEvent: { event in
+            Task {
+                await SessionStore.shared.process(.hookReceived(event))
+            }
 
-                if event.sessionPhase == .processing {
-                    Task { @MainActor in
-                        InterruptWatcherManager.shared.startWatching(
-                            sessionId: event.sessionId,
-                            cwd: event.cwd
-                        )
-                    }
-                }
-
-                if event.status == "ended" {
-                    Task { @MainActor in
-                        InterruptWatcherManager.shared.stopWatching(sessionId: event.sessionId)
-                    }
-                }
-
-                if event.event == "Stop" {
-                    HookSocketServer.shared.cancelPendingPermissions(sessionId: event.sessionId)
-                }
-
-                if event.event == "PostToolUse", let toolUseId = event.toolUseId {
-                    HookSocketServer.shared.cancelPendingPermission(toolUseId: toolUseId)
-                }
-            },
-            onPermissionFailure: { sessionId, toolUseId in
-                Task {
-                    await SessionStore.shared.process(
-                        .permissionSocketFailed(sessionId: sessionId, toolUseId: toolUseId)
+            if event.sessionPhase == .processing {
+                Task { @MainActor in
+                    InterruptWatcherManager.shared.startWatching(
+                        sessionId: event.sessionId,
+                        cwd: event.cwd,
+                        transcriptPath: event.transcriptPath
                     )
                 }
             }
-        )
+
+            if event.status == "ended" {
+                Task { @MainActor in
+                    InterruptWatcherManager.shared.stopWatching(sessionId: event.sessionId)
+                }
+            }
+        })
     }
 
     func stopMonitoring() {
         HookSocketServer.shared.stop()
-    }
-
-    // MARK: - Permission Handling
-
-    func approvePermission(sessionId: String) {
-        Task {
-            guard let session = await SessionStore.shared.session(for: sessionId),
-                  let permission = session.activePermission else {
-                return
-            }
-
-            HookSocketServer.shared.respondToPermission(
-                toolUseId: permission.toolUseId,
-                decision: "allow"
-            )
-
-            await SessionStore.shared.process(
-                .permissionApproved(sessionId: sessionId, toolUseId: permission.toolUseId)
-            )
-        }
-    }
-
-    func denyPermission(sessionId: String, reason: String?) {
-        Task {
-            guard let session = await SessionStore.shared.session(for: sessionId),
-                  let permission = session.activePermission else {
-                return
-            }
-
-            HookSocketServer.shared.respondToPermission(
-                toolUseId: permission.toolUseId,
-                decision: "deny",
-                reason: reason
-            )
-
-            await SessionStore.shared.process(
-                .permissionDenied(sessionId: sessionId, toolUseId: permission.toolUseId, reason: reason)
-            )
-        }
     }
 
     /// Archive (remove) a session from the instances list
