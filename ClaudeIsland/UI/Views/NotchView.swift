@@ -9,10 +9,14 @@ import AppKit
 import CoreGraphics
 import SwiftUI
 
-// Corner radius constants
-private let cornerRadiusInsets = (
+// Corner radius constants per display type
+private let notchCornerRadius = (
     opened: (top: CGFloat(19), bottom: CGFloat(24)),
     closed: (top: CGFloat(6), bottom: CGFloat(14))
+)
+private let externalCornerRadius = (
+    opened: (top: CGFloat(10), bottom: CGFloat(14)),
+    closed: (top: CGFloat(4), bottom: CGFloat(8))
 )
 
 struct NotchView: View {
@@ -93,6 +97,10 @@ struct NotchView: View {
     }
 
     // MARK: - Corner Radii
+
+    private var cornerRadiusInsets: (opened: (top: CGFloat, bottom: CGFloat), closed: (top: CGFloat, bottom: CGFloat)) {
+        viewModel.hasPhysicalNotch ? notchCornerRadius : externalCornerRadius
+    }
 
     private var topCornerRadius: CGFloat {
         viewModel.status == .opened

@@ -29,6 +29,15 @@ actor SessionStore {
     /// Sync debounce interval (100ms)
     private let syncDebounceNs: UInt64 = 100_000_000
 
+    /// Inactivity timeout: sessions in active phases with no hook events for this long get moved to idle
+    private let inactivityTimeout: TimeInterval = 180  // 3 minutes
+
+    /// Periodic check interval for stale sessions
+    private let inactivityCheckInterval: UInt64 = 30_000_000_000  // 30 seconds
+
+    /// Background task for inactivity checks
+    private var inactivityTimer: Task<Void, Never>?
+
     // MARK: - Published State (for UI)
 
     /// Publisher for session state changes (nonisolated for Combine subscription from any context)
@@ -801,6 +810,40 @@ actor SessionStore {
     private func publishState() {
         let sortedSessions = Array(sessions.values).sorted { $0.projectName < $1.projectName }
         sessionsSubject.send(sortedSessions)
+    }
+
+    // MARK: - Inactivity Timer
+
+    /// Start periodic checks for stale sessions stuck in active phases
+    func startInactivityTimer() {
+        guard inactivityTimer == nil else { return }
+        inactivityTimer = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: self?.inactivityCheckInterval ?? 30_000_000_000)
+                guard !Task.isCancelled else { break }
+                await self?.expireInactiveSessions()
+            }
+        }
+    }
+
+    /// Check all sessions and move stale active ones to idle
+    private func expireInactiveSessions() {
+        let cutoff = Date().addingTimeInterval(-inactivityTimeout)
+        var changed = false
+
+        for (sessionId, session) in sessions {
+            // Only expire sessions stuck in active phases (processing/compacting)
+            guard session.phase.isActive else { continue }
+            guard session.lastActivity < cutoff else { continue }
+
+            Self.logger.info("Session \(sessionId.prefix(8), privacy: .public) inactive for >\(Int(self.inactivityTimeout))s in \(String(describing: session.phase), privacy: .public), moving to idle")
+            sessions[sessionId]?.phase = .idle
+            changed = true
+        }
+
+        if changed {
+            publishState()
+        }
     }
 
     // MARK: - Queries

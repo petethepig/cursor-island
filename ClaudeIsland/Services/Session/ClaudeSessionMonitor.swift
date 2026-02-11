@@ -31,6 +31,10 @@ class ClaudeSessionMonitor: ObservableObject {
     // MARK: - Monitoring Lifecycle
 
     func startMonitoring() {
+        Task {
+            await SessionStore.shared.startInactivityTimer()
+        }
+
         HookSocketServer.shared.start(onEvent: { event in
             Task {
                 await SessionStore.shared.process(.hookReceived(event))
