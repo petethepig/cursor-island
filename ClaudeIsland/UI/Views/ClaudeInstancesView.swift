@@ -193,7 +193,7 @@ struct InstanceRow: View {
                     onChat()
                 }
 
-                if isYabaiAvailable || session.agentType == .cursor || session.agentType == .pi {
+                if isYabaiAvailable || session.agentType == .cursor {
                     IconButton(icon: "eye") {
                         onFocus()
                     }

@@ -23,6 +23,7 @@ struct HookInstaller {
     // Pi Coding Agent uses hooks.json with camelCase event names (at ~/.pi/agent/)
     private static let piDirName = ".pi"
     private static let piAgentDirName = "agent"
+    private static let piHookScriptsDirName = "hook-scripts"
     private static let piScriptName = "pi-island-state.py"
 
     /// Install hook scripts and update both config files on app launch
@@ -64,13 +65,13 @@ struct HookInstaller {
         let piAgentDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(piDirName)
             .appendingPathComponent(piAgentDirName)
-        let piHooksDir = piAgentDir.appendingPathComponent(hooksDirName)
-        let piScript = piHooksDir.appendingPathComponent(piScriptName)
+        let piHookScriptsDir = piAgentDir.appendingPathComponent(piHookScriptsDirName)
+        let piScript = piHookScriptsDir.appendingPathComponent(piScriptName)
         let piHooksJSON = piAgentDir.appendingPathComponent(hooksJSONName)
 
         if FileManager.default.fileExists(atPath: piAgentDir.path) {
             try? FileManager.default.createDirectory(
-                at: piHooksDir,
+                at: piHookScriptsDir,
                 withIntermediateDirectories: true
             )
 
@@ -213,7 +214,7 @@ struct HookInstaller {
         }
 
         let python = detectPython()
-        let command = "\(python) ~/.pi/agent/hooks/\(piScriptName)"
+        let command = "\(python) ~/.pi/agent/hook-scripts/\(piScriptName)"
 
         let hookEvents = [
             "beforeSubmitPrompt",
@@ -354,8 +355,8 @@ struct HookInstaller {
         let piAgentDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(piDirName)
             .appendingPathComponent(piAgentDirName)
-        let piHooksDir = piAgentDir.appendingPathComponent(hooksDirName)
-        let piScript = piHooksDir.appendingPathComponent(piScriptName)
+        let piHookScriptsDir = piAgentDir.appendingPathComponent(piHookScriptsDirName)
+        let piScript = piHookScriptsDir.appendingPathComponent(piScriptName)
         try? FileManager.default.removeItem(at: piScript)
 
         let piHooksJSON = piAgentDir.appendingPathComponent(hooksJSONName)

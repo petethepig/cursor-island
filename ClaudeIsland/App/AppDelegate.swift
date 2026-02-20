@@ -6,6 +6,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowManager: WindowManager?
     private var screenObserver: ScreenObserver?
     private var updateCheckTimer: Timer?
+    private var lockFileDescriptor: Int32 = -1
 
     static var shared: AppDelegate?
     let updater: SPUUpdater
@@ -66,9 +67,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         updateCheckTimer?.invalidate()
         screenObserver = nil
+
+        if lockFileDescriptor >= 0 {
+            flock(lockFileDescriptor, LOCK_UN)
+            close(lockFileDescriptor)
+            lockFileDescriptor = -1
+        }
     }
 
     private func ensureSingleInstance() -> Bool {
+        // Bundle ID check for App Store / release builds
         let bundleID = Bundle.main.bundleIdentifier ?? "com.farouqaldori.ClaudeIsland"
         let runningApps = NSWorkspace.shared.runningApplications.filter {
             $0.bundleIdentifier == bundleID
@@ -81,6 +89,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return false
         }
 
+        // Lock file check — catches debug vs release and different build paths
+        let lockPath = "/tmp/claude-island.lock"
+        let fd = open(lockPath, O_CREAT | O_RDWR, 0o644)
+        guard fd >= 0 else { return true }
+
+        if flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            close(fd)
+            return false
+        }
+
+        lockFileDescriptor = fd
         return true
     }
 }
