@@ -15,6 +15,7 @@ private let logger = Logger(subsystem: "com.claudeisland", category: "Hooks")
 enum AgentType: String, Codable, Sendable {
     case claude
     case cursor
+    case pi
 }
 
 /// Event received from Claude Code or Cursor hooks

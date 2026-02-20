@@ -502,7 +502,7 @@ actor ConversationParser {
         return Self.sessionFilePath(sessionId: sessionId, cwd: cwd)
     }
 
-    /// Build session file path from cwd — tries ~/.claude and ~/.cursor paths
+    /// Build session file path from cwd — tries ~/.claude, ~/.cursor, and ~/.pi paths
     private static func sessionFilePath(sessionId: String, cwd: String) -> String {
         let projectDir = cwd.trimmingCharacters(in: CharacterSet(charactersIn: "/")).replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
 
@@ -524,8 +524,28 @@ actor ConversationParser {
             return cursorTranscriptPath
         }
 
+        // Try ~/.pi/agent/sessions/ (Pi Coding Agent)
+        // Pi uses --<path-encoded>-- directory naming
+        let piSessionsDir = NSHomeDirectory() + "/.pi/agent/sessions/--" + projectDir + "--"
+        if let piFile = findPiSessionFile(in: piSessionsDir, sessionId: sessionId) {
+            return piFile
+        }
+
         // Default to Claude transcript path (will be created if session is new)
         return claudeTranscriptPath
+    }
+
+    /// Find a Pi session file by scanning the session directory for a matching session ID.
+    /// Pi session files are named <timestamp>_<uuid>.jsonl
+    private static func findPiSessionFile(in directory: String, sessionId: String) -> String? {
+        guard FileManager.default.fileExists(atPath: directory) else { return nil }
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: directory) else { return nil }
+        for file in files where file.hasSuffix(".jsonl") {
+            if file.contains(sessionId) {
+                return directory + "/" + file
+            }
+        }
+        return nil
     }
 
     private func parseMessageLine(_ json: [String: Any], seenToolIds: inout Set<String>, toolIdToName: inout [String: String]) -> ChatMessage? {

@@ -28,7 +28,7 @@ struct ClaudeInstancesView: View {
                 .font(.system(size: 13, weight: .medium))
                 .foregroundColor(.white.opacity(0.4))
 
-            Text("Run Claude Code or Cursor")
+            Text("Run Claude Code, Cursor, or Pi")
                 .font(.system(size: 11))
                 .foregroundColor(.white.opacity(0.25))
         }
@@ -89,7 +89,7 @@ struct ClaudeInstancesView: View {
             switch session.agentType {
             case .cursor:
                 _ = await CursorWindowFocuser.shared.focusCursorWindow(workspacePath: session.cwd)
-            case .claude:
+            case .claude, .pi:
                 _ = await YabaiController.shared.focusWindow(forWorkingDirectory: session.cwd)
             }
         }
@@ -193,7 +193,7 @@ struct InstanceRow: View {
                     onChat()
                 }
 
-                if isYabaiAvailable || session.agentType == .cursor {
+                if isYabaiAvailable || session.agentType == .cursor || session.agentType == .pi {
                     IconButton(icon: "eye") {
                         onFocus()
                     }
@@ -282,7 +282,7 @@ struct AgentBadge: View {
     let agentType: AgentType
 
     var body: some View {
-        Text(agentType == .cursor ? "C" : "CC")
+        Text(badgeLabel)
             .font(.system(size: 8, weight: .bold, design: .monospaced))
             .foregroundColor(badgeColor.opacity(0.9))
             .padding(.horizontal, 3)
@@ -297,8 +297,20 @@ struct AgentBadge: View {
             )
     }
 
+    private var badgeLabel: String {
+        switch agentType {
+        case .cursor: return "C"
+        case .pi: return "Pi"
+        case .claude: return "CC"
+        }
+    }
+
     private var badgeColor: Color {
-        agentType == .cursor ? Color.blue : Color(red: 0.85, green: 0.47, blue: 0.34)
+        switch agentType {
+        case .cursor: return Color.blue
+        case .pi: return Color.green
+        case .claude: return Color(red: 0.85, green: 0.47, blue: 0.34)
+        }
     }
 }
 

@@ -20,6 +20,11 @@ struct HookInstaller {
     private static let cursorScriptName = "cursor-island-state.py"
     private static let hooksJSONName = "hooks.json"
 
+    // Pi Coding Agent uses hooks.json with camelCase event names (at ~/.pi/agent/)
+    private static let piDirName = ".pi"
+    private static let piAgentDirName = "agent"
+    private static let piScriptName = "pi-island-state.py"
+
     /// Install hook scripts and update both config files on app launch
     static func installIfNeeded() {
         let claudeDir = FileManager.default.homeDirectoryForCurrentUser
@@ -53,6 +58,32 @@ struct HookInstaller {
                 [.posixPermissions: 0o755],
                 ofItemAtPath: cursorScript.path
             )
+        }
+
+        // Copy Pi hook script
+        let piAgentDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(piDirName)
+            .appendingPathComponent(piAgentDirName)
+        let piHooksDir = piAgentDir.appendingPathComponent(hooksDirName)
+        let piScript = piHooksDir.appendingPathComponent(piScriptName)
+        let piHooksJSON = piAgentDir.appendingPathComponent(hooksJSONName)
+
+        if FileManager.default.fileExists(atPath: piAgentDir.path) {
+            try? FileManager.default.createDirectory(
+                at: piHooksDir,
+                withIntermediateDirectories: true
+            )
+
+            if let bundled = Bundle.main.url(forResource: "pi-island-state", withExtension: "py") {
+                try? FileManager.default.removeItem(at: piScript)
+                try? FileManager.default.copyItem(at: bundled, to: piScript)
+                try? FileManager.default.setAttributes(
+                    [.posixPermissions: 0o755],
+                    ofItemAtPath: piScript.path
+                )
+            }
+
+            updatePiHooksJSON(at: piHooksJSON)
         }
 
         updateClaudeSettings(at: settingsJSON)
@@ -169,9 +200,56 @@ struct HookInstaller {
         }
     }
 
+    // MARK: - Pi Coding Agent: hooks.json (camelCase, flat format, at ~/.pi/agent/)
+
+    private static func updatePiHooksJSON(at hooksURL: URL) {
+        var json: [String: Any] = ["version": 1]
+        var hooks: [String: Any] = [:]
+
+        if let data = try? Data(contentsOf: hooksURL),
+           let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let existingHooks = existing["hooks"] as? [String: Any] {
+            hooks = existingHooks
+        }
+
+        let python = detectPython()
+        let command = "\(python) ~/.pi/agent/hooks/\(piScriptName)"
+
+        let hookEvents = [
+            "beforeSubmitPrompt",
+            "preToolUse",
+            "postToolUse",
+            "stop",
+            "subagentStop",
+            "sessionStart",
+            "sessionEnd",
+            "preCompact",
+        ]
+
+        for event in hookEvents {
+            var entries = hooks[event] as? [[String: Any]] ?? []
+            let hasOurHook = entries.contains { entry in
+                (entry["command"] as? String)?.contains("pi-island-state.py") == true
+            }
+            if !hasOurHook {
+                entries.append(["command": command])
+                hooks[event] = entries
+            }
+        }
+
+        json["hooks"] = hooks
+
+        if let data = try? JSONSerialization.data(
+            withJSONObject: json,
+            options: [.prettyPrinted, .sortedKeys]
+        ) {
+            try? data.write(to: hooksURL)
+        }
+    }
+
     // MARK: - Status
 
-    /// Check if hooks are currently installed (checks either config)
+    /// Check if hooks are currently installed (checks any config)
     static func isInstalled() -> Bool {
         let claudeDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(claudeDirName)
@@ -185,6 +263,15 @@ struct HookInstaller {
         // Check settings.json (Claude Code)
         let settingsJSON = claudeDir.appendingPathComponent(settingsJSONName)
         if checkSettingsJSON(at: settingsJSON, scriptName: claudeScriptName) {
+            return true
+        }
+
+        // Check hooks.json (Pi)
+        let piHooksJSON = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(piDirName)
+            .appendingPathComponent(piAgentDirName)
+            .appendingPathComponent(hooksJSONName)
+        if checkHooksJSON(at: piHooksJSON, scriptName: piScriptName) {
             return true
         }
 
@@ -237,7 +324,7 @@ struct HookInstaller {
 
     // MARK: - Uninstall
 
-    /// Uninstall hooks from both config files and remove scripts
+    /// Uninstall hooks from all config files and remove scripts
     static func uninstall() {
         let claudeDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(claudeDirName)
@@ -256,6 +343,17 @@ struct HookInstaller {
         // Clean settings.json (Claude Code)
         let settingsJSON = claudeDir.appendingPathComponent(settingsJSONName)
         cleanSettingsJSON(at: settingsJSON, scriptName: claudeScriptName)
+
+        // Remove Pi script and clean Pi hooks.json
+        let piAgentDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(piDirName)
+            .appendingPathComponent(piAgentDirName)
+        let piHooksDir = piAgentDir.appendingPathComponent(hooksDirName)
+        let piScript = piHooksDir.appendingPathComponent(piScriptName)
+        try? FileManager.default.removeItem(at: piScript)
+
+        let piHooksJSON = piAgentDir.appendingPathComponent(hooksJSONName)
+        cleanHooksJSON(at: piHooksJSON, scriptName: piScriptName)
     }
 
     private static func cleanHooksJSON(at url: URL, scriptName: String) {
