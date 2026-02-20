@@ -119,7 +119,7 @@ actor ConversationParser {
                 continue
             }
 
-            let type = (json["type"] as? String) ?? (json["role"] as? String)
+            let type = Self.resolveRole(from: json)
             let isMeta = json["isMeta"] as? Bool ?? false
 
             if type == "user" && !isMeta {
@@ -139,7 +139,7 @@ actor ConversationParser {
                 continue
             }
 
-            let type = (json["type"] as? String) ?? (json["role"] as? String)
+            let type = Self.resolveRole(from: json)
 
             if lastMessage == nil {
                 if type == "user" || type == "assistant" {
@@ -153,9 +153,10 @@ actor ConversationParser {
                         } else if let contentArray = message["content"] as? [[String: Any]] {
                             for block in contentArray.reversed() {
                                 let blockType = block["type"] as? String
-                                if blockType == "tool_use" {
+                                if blockType == "tool_use" || blockType == "toolCall" {
                                     let toolName = block["name"] as? String ?? "Tool"
-                                    let toolInput = Self.formatToolInput(block["input"] as? [String: Any], toolName: toolName)
+                                    let inputSource = (block["input"] as? [String: Any]) ?? (block["arguments"] as? [String: Any])
+                                    let toolInput = Self.formatToolInput(inputSource, toolName: toolName)
                                     lastMessage = toolInput
                                     lastMessageRole = "tool"
                                     lastToolName = toolName
@@ -185,7 +186,8 @@ actor ConversationParser {
                 }
             }
 
-            if summary == nil, type == "summary", let summaryText = json["summary"] as? String {
+            let topType = json["type"] as? String
+            if summary == nil, topType == "summary", let summaryText = json["summary"] as? String {
                 summary = summaryText
             }
 
@@ -395,46 +397,82 @@ actor ConversationParser {
                 continue
             }
 
-            if line.contains("\"tool_result\"") {
+            if line.contains("\"tool_result\"") || line.contains("\"toolResult\"") {
                 if let lineData = line.data(using: .utf8),
                    let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                   let messageDict = json["message"] as? [String: Any],
-                   let contentArray = messageDict["content"] as? [[String: Any]] {
-                    let toolUseResult = json["toolUseResult"] as? [String: Any]
-                    let topLevelToolName = json["toolName"] as? String
-                    let stdout = toolUseResult?["stdout"] as? String
-                    let stderr = toolUseResult?["stderr"] as? String
+                   let messageDict = json["message"] as? [String: Any] {
 
-                    for block in contentArray {
-                        if block["type"] as? String == "tool_result",
-                           let toolUseId = block["tool_use_id"] as? String {
-                            state.completedToolIds.insert(toolUseId)
+                    // Pi format: {"type":"message","message":{"role":"toolResult","toolCallId":"...","toolName":"...",...}}
+                    if messageDict["role"] as? String == "toolResult",
+                       let toolCallId = messageDict["toolCallId"] as? String {
+                        state.completedToolIds.insert(toolCallId)
 
-                            let content = block["content"] as? String
-                            let isError = block["is_error"] as? Bool ?? false
-                            state.toolResults[toolUseId] = ToolResult(
-                                content: content,
-                                stdout: stdout,
-                                stderr: stderr,
+                        let isError = messageDict["isError"] as? Bool ?? false
+                        var contentText: String?
+                        if let contentArray = messageDict["content"] as? [[String: Any]] {
+                            for block in contentArray {
+                                if block["type"] as? String == "text",
+                                   let text = block["text"] as? String {
+                                    contentText = text
+                                    break
+                                }
+                            }
+                        }
+                        state.toolResults[toolCallId] = ToolResult(
+                            content: contentText,
+                            stdout: nil,
+                            stderr: nil,
+                            isError: isError
+                        )
+                        let toolName = messageDict["toolName"] as? String ?? state.toolIdToName[toolCallId]
+                        if let name = toolName {
+                            let structured = Self.parseStructuredResult(
+                                toolName: name,
+                                toolUseResult: messageDict as [String: Any],
                                 isError: isError
                             )
+                            state.structuredResults[toolCallId] = structured
+                        }
+                    }
+                    // Claude format: {"message":{"content":[{"type":"tool_result","tool_use_id":"..."}]}}
+                    else if let contentArray = messageDict["content"] as? [[String: Any]] {
+                        let toolUseResult = json["toolUseResult"] as? [String: Any]
+                        let topLevelToolName = json["toolName"] as? String
+                        let stdout = toolUseResult?["stdout"] as? String
+                        let stderr = toolUseResult?["stderr"] as? String
 
-                            let toolName = topLevelToolName ?? state.toolIdToName[toolUseId]
+                        for block in contentArray {
+                            if block["type"] as? String == "tool_result",
+                               let toolUseId = block["tool_use_id"] as? String {
+                                state.completedToolIds.insert(toolUseId)
 
-                            if let toolUseResult = toolUseResult,
-                               let name = toolName {
-                                let structured = Self.parseStructuredResult(
-                                    toolName: name,
-                                    toolUseResult: toolUseResult,
+                                let content = block["content"] as? String
+                                let isError = block["is_error"] as? Bool ?? false
+                                state.toolResults[toolUseId] = ToolResult(
+                                    content: content,
+                                    stdout: stdout,
+                                    stderr: stderr,
                                     isError: isError
                                 )
-                                state.structuredResults[toolUseId] = structured
+
+                                let toolName = topLevelToolName ?? state.toolIdToName[toolUseId]
+
+                                if let toolUseResult = toolUseResult,
+                                   let name = toolName {
+                                    let structured = Self.parseStructuredResult(
+                                        toolName: name,
+                                        toolUseResult: toolUseResult,
+                                        isError: isError
+                                    )
+                                    state.structuredResults[toolUseId] = structured
+                                }
                             }
                         }
                     }
                 }
             } else if line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\"") ||
-                      line.contains("\"role\":\"user\"") || line.contains("\"role\":\"assistant\"") {
+                      line.contains("\"role\":\"user\"") || line.contains("\"role\":\"assistant\"") ||
+                      line.contains("\"type\":\"message\"") {
                 if let lineData = line.data(using: .utf8),
                    let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
                    let message = parseMessageLine(json, seenToolIds: &state.seenToolIds, toolIdToName: &state.toolIdToName) {
@@ -548,12 +586,30 @@ actor ConversationParser {
         return nil
     }
 
+    /// Resolve the role ("user"/"assistant") from a JSONL line.
+    /// Claude format: {"type":"user", "message":{...}}
+    /// Pi format:     {"type":"message", "message":{"role":"user", ...}}
+    private static func resolveRole(from json: [String: Any]) -> String? {
+        let topType = json["type"] as? String
+        if topType == "user" || topType == "assistant" {
+            return topType
+        }
+        if let role = json["role"] as? String, role == "user" || role == "assistant" {
+            return role
+        }
+        if topType == "message",
+           let message = json["message"] as? [String: Any],
+           let role = message["role"] as? String {
+            return role
+        }
+        return nil
+    }
+
     private func parseMessageLine(_ json: [String: Any], seenToolIds: inout Set<String>, toolIdToName: inout [String: String]) -> ChatMessage? {
-        let type = (json["type"] as? String) ?? (json["role"] as? String)
-        guard let roleType = type, roleType == "user" || roleType == "assistant" else {
+        guard let roleType = Self.resolveRole(from: json) else {
             return nil
         }
-        let uuid = (json["uuid"] as? String) ?? UUID().uuidString
+        let uuid = (json["uuid"] as? String) ?? (json["id"] as? String) ?? UUID().uuidString
 
         if json["isMeta"] as? Bool == true {
             return nil
@@ -595,7 +651,7 @@ actor ConversationParser {
                                 blocks.append(.text(text))
                             }
                         }
-                    case "tool_use":
+                    case "tool_use", "toolCall":
                         if let toolId = block["id"] as? String {
                             if seenToolIds.contains(toolId) {
                                 continue
@@ -638,7 +694,8 @@ actor ConversationParser {
         }
 
         var input: [String: String] = [:]
-        if let inputDict = block["input"] as? [String: Any] {
+        let inputSource = (block["input"] as? [String: Any]) ?? (block["arguments"] as? [String: Any])
+        if let inputDict = inputSource {
             for (key, value) in inputDict {
                 if let strValue = value as? String {
                     input[key] = strValue
@@ -990,22 +1047,30 @@ actor ConversationParser {
         var completedToolIds: Set<String> = []
 
         for line in content.components(separatedBy: "\n") where !line.isEmpty {
-            if line.contains("\"tool_result\""),
-               let lineData = line.data(using: .utf8),
-               let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-               let messageDict = json["message"] as? [String: Any],
-               let contentArray = messageDict["content"] as? [[String: Any]] {
-                for block in contentArray {
-                    if block["type"] as? String == "tool_result",
-                       let toolUseId = block["tool_use_id"] as? String {
-                        completedToolIds.insert(toolUseId)
+            if line.contains("\"tool_result\"") || line.contains("\"toolResult\"") {
+                if let lineData = line.data(using: .utf8),
+                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                   let messageDict = json["message"] as? [String: Any] {
+                    // Pi format
+                    if messageDict["role"] as? String == "toolResult",
+                       let toolCallId = messageDict["toolCallId"] as? String {
+                        completedToolIds.insert(toolCallId)
+                    }
+                    // Claude format
+                    else if let contentArray = messageDict["content"] as? [[String: Any]] {
+                        for block in contentArray {
+                            if block["type"] as? String == "tool_result",
+                               let toolUseId = block["tool_use_id"] as? String {
+                                completedToolIds.insert(toolUseId)
+                            }
+                        }
                     }
                 }
             }
         }
 
         for line in content.components(separatedBy: "\n") where !line.isEmpty {
-            guard line.contains("\"tool_use\""),
+            guard line.contains("\"tool_use\"") || line.contains("\"toolCall\""),
                   let lineData = line.data(using: .utf8),
                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
                   let messageDict = json["message"] as? [String: Any],
@@ -1014,7 +1079,8 @@ actor ConversationParser {
             }
 
             for block in contentArray {
-                guard block["type"] as? String == "tool_use",
+                let blockType = block["type"] as? String
+                guard blockType == "tool_use" || blockType == "toolCall",
                       let toolId = block["id"] as? String,
                       let toolName = block["name"] as? String,
                       !seenToolIds.contains(toolId) else {
@@ -1024,7 +1090,8 @@ actor ConversationParser {
                 seenToolIds.insert(toolId)
 
                 var input: [String: String] = [:]
-                if let inputDict = block["input"] as? [String: Any] {
+                let inputSource = (block["input"] as? [String: Any]) ?? (block["arguments"] as? [String: Any])
+                if let inputDict = inputSource {
                     for (key, value) in inputDict {
                         if let strValue = value as? String {
                             input[key] = strValue
@@ -1089,22 +1156,27 @@ extension ConversationParser {
         var completedToolIds: Set<String> = []
 
         for line in content.components(separatedBy: "\n") where !line.isEmpty {
-            if line.contains("\"tool_result\""),
-               let lineData = line.data(using: .utf8),
-               let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-               let messageDict = json["message"] as? [String: Any],
-               let contentArray = messageDict["content"] as? [[String: Any]] {
-                for block in contentArray {
-                    if block["type"] as? String == "tool_result",
-                       let toolUseId = block["tool_use_id"] as? String {
-                        completedToolIds.insert(toolUseId)
+            if line.contains("\"tool_result\"") || line.contains("\"toolResult\"") {
+                if let lineData = line.data(using: .utf8),
+                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                   let messageDict = json["message"] as? [String: Any] {
+                    if messageDict["role"] as? String == "toolResult",
+                       let toolCallId = messageDict["toolCallId"] as? String {
+                        completedToolIds.insert(toolCallId)
+                    } else if let contentArray = messageDict["content"] as? [[String: Any]] {
+                        for block in contentArray {
+                            if block["type"] as? String == "tool_result",
+                               let toolUseId = block["tool_use_id"] as? String {
+                                completedToolIds.insert(toolUseId)
+                            }
+                        }
                     }
                 }
             }
         }
 
         for line in content.components(separatedBy: "\n") where !line.isEmpty {
-            guard line.contains("\"tool_use\""),
+            guard line.contains("\"tool_use\"") || line.contains("\"toolCall\""),
                   let lineData = line.data(using: .utf8),
                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
                   let messageDict = json["message"] as? [String: Any],
@@ -1113,7 +1185,8 @@ extension ConversationParser {
             }
 
             for block in contentArray {
-                guard block["type"] as? String == "tool_use",
+                let blockType = block["type"] as? String
+                guard blockType == "tool_use" || blockType == "toolCall",
                       let toolId = block["id"] as? String,
                       let toolName = block["name"] as? String,
                       !seenToolIds.contains(toolId) else {
@@ -1123,7 +1196,8 @@ extension ConversationParser {
                 seenToolIds.insert(toolId)
 
                 var input: [String: String] = [:]
-                if let inputDict = block["input"] as? [String: Any] {
+                let inputSource = (block["input"] as? [String: Any]) ?? (block["arguments"] as? [String: Any])
+                if let inputDict = inputSource {
                     for (key, value) in inputDict {
                         if let strValue = value as? String {
                             input[key] = strValue

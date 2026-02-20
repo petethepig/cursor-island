@@ -89,8 +89,8 @@ def main():
     if data is None:
         return
 
-    # Pi format: conversation_id or session_id, workspace_roots or cwd, camelCase events
-    session_id = data.get("conversation_id") or data.get("session_id") or "unknown"
+    # Pi format: session_id is the full JSONL file path, workspace_roots has cwd
+    raw_session_id = data.get("session_id") or ""
     event = data.get("hook_event_name", "")
     workspace_roots = data.get("workspace_roots") or []
     cwd = data.get("cwd") or (workspace_roots[0] if workspace_roots else "")
@@ -101,10 +101,26 @@ def main():
         except Exception:
             tool_input = {}
 
-    # Extract transcript path if provided
-    transcript_path = data.get("transcript_path", "")
-    if transcript_path and transcript_path.endswith(".txt"):
-        transcript_path = transcript_path[:-4] + ".jsonl"
+    # Pi sends session_id as the full file path to the JSONL session file.
+    # Extract the UUID from the filename (format: <timestamp>_<uuid>.jsonl)
+    # and pass the full path as transcript_path.
+    transcript_path = ""
+    session_id = raw_session_id
+    if raw_session_id and "/" in raw_session_id:
+        transcript_path = raw_session_id
+        basename = os.path.basename(raw_session_id)
+        # Strip .jsonl extension
+        if basename.endswith(".jsonl"):
+            basename = basename[:-6]
+        # Extract UUID after the timestamp prefix (timestamp_uuid)
+        parts = basename.split("_", 1)
+        if len(parts) == 2:
+            session_id = parts[1]
+        else:
+            session_id = basename
+
+    if not session_id or session_id == "ephemeral":
+        session_id = "unknown"
 
     # Build state object
     state = {

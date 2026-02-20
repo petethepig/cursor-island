@@ -228,11 +228,17 @@ struct HookInstaller {
 
         for event in hookEvents {
             var entries = hooks[event] as? [[String: Any]] ?? []
+            // Remove stale cursor-island-state entries from pi config
+            entries.removeAll { entry in
+                (entry["command"] as? String)?.contains("cursor-island-state.py") == true
+            }
             let hasOurHook = entries.contains { entry in
                 (entry["command"] as? String)?.contains("pi-island-state.py") == true
             }
             if !hasOurHook {
                 entries.append(["command": command])
+                hooks[event] = entries
+            } else {
                 hooks[event] = entries
             }
         }
