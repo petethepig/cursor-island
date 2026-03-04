@@ -35,7 +35,11 @@ class ClaudeSessionMonitor: ObservableObject {
             await SessionStore.shared.startInactivityTimer()
         }
 
+        ActivityHookRunner.shared.start()
+
         HookSocketServer.shared.start(onEvent: { event in
+            if event.isCursorSubagent { return }
+
             Task {
                 await SessionStore.shared.process(.hookReceived(event))
             }

@@ -49,6 +49,16 @@ struct HookEvent: Codable, Sendable {
         toolDisplay ?? tool
     }
 
+    /// Cursor subagents (Task tool) run in macOS temp directories.
+    /// Detect these to avoid showing them as separate sessions.
+    nonisolated var isCursorSubagent: Bool {
+        guard agentType == .cursor, !cwd.isEmpty else { return false }
+        return cwd.hasPrefix("/var/folders/") ||
+               cwd.hasPrefix("/private/var/folders/") ||
+               cwd.hasPrefix("/tmp/") ||
+               cwd.hasPrefix("/private/tmp/")
+    }
+
     var sessionPhase: SessionPhase {
         if event == "preCompact" {
             return .compacting

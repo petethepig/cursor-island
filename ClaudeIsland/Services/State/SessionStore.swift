@@ -111,6 +111,11 @@ actor SessionStore {
     // MARK: - Hook Event Processing
 
     private func processHookEvent(_ event: HookEvent) async {
+        if event.isCursorSubagent {
+            Self.logger.debug("Skipping Cursor subagent session from temp dir: \(event.sessionId.prefix(8), privacy: .public)")
+            return
+        }
+
         let sessionId = event.sessionId
         let isNewSession = sessions[sessionId] == nil
         var session = sessions[sessionId] ?? createSession(from: event)
